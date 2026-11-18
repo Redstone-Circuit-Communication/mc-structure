@@ -1,0 +1,3 @@
+# 代码按 160 列写（SQL 字面量长）；cargo fmt --all 之后 CI 的 fmt --check 才会过
+max_width = 160
+use_small_heuristics = "Max"

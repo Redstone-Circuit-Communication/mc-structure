@@ -1,0 +1,48 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      matrix:
+        toolchain: ["1.91.1", "1.94", stable]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+        if: matrix.toolchain == '1.94'
+      - run: cargo clippy --all-targets -- -D warnings
+        if: matrix.toolchain == '1.94'
+      - run: cargo test --locked
+
+  # 黄金样本：Python 参考实现重新算一遍，必须和 tests/fixtures.rs 里写死的一致
+  golden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cd tools
+          for f in ../tests/fixtures/*.mcstructure; do
+            d=$(python3 golden.py "$f" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read().split(" ",1)[1])["digest"])')
+            grep -q "$d" ../tests/fixtures.rs || { echo "$f 的摘要 $d 不在 tests/fixtures.rs 里"; exit 1; }
+          done
+      # 投影与原版结构的夹具：摘要必须和 tests/litematic.rs 里写死的一致；脚本重新生成的夹具读出来也要和提交的一样（不比字节：压缩的输出随 zlib 版本变）
+      - run: |
+          cd tools
+          for f in ../tests/fixtures/*.litematic ../tests/fixtures/door_*.nbt ../tests/fixtures/multi_region_flat.nbt; do
+            d=$(python3 litematic.py read "$f" | python3 -c 'import sys,json; print(json.loads(sys.stdin.read().split(" ",1)[1])["digest"])')
+            grep -q "$d" ../tests/litematic.rs || { echo "$f 的摘要 $d 不在 tests/litematic.rs 里"; exit 1; }
+          done
+          python3 litematic.py gen /tmp/regen
+          for f in /tmp/regen/*; do
+            a=$(python3 litematic.py read "$f" | cut -d' ' -f2-)
+            b=$(python3 litematic.py read "../tests/fixtures/$(basename "$f")" | cut -d' ' -f2-)
+            [ "$a" = "$b" ] || { echo "$f 重新生成后读出来的内容变了"; exit 1; }
+          done
