@@ -2,6 +2,10 @@
 //! 它把整个 long 数组当成一个大整数按位切，本库是两个 long 之间移位拼接）。
 //! 另外现场造投影：一个「一位一位放」的打包器（和库里的写法完全不同）覆盖各种调色板大小，再造各种坏文件。
 
+// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
+// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
 use std::io::{Read, Write};
 
 use mc_structure::nbt::{self, Compound, Endian, Tag};

@@ -1,5 +1,9 @@
 //! 真实样本的黄金测试。期望值由独立的 Python 参考实现算出（`tools/golden.py`，与本库不共享代码）。
 
+// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
+// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
 use mc_structure::{Edition, Limits, parse};
 
 fn load(name: &str) -> mc_structure::Structure {

@@ -1,6 +1,10 @@
 //! 评审 M1：内存放大。一个 gzip 后只有几 KB 的文件，解压出来是一个 400 万元素的字节列表——线上每个元素 1 字节，
 //! 在内存里是一个 32 字节的标签。以前按元素个数记账，这样的文件能占到约 128 MB；现在按字节记，分配之前就拒绝。
 
+// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
+// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
 use std::io::Write;
 
 use mc_structure::nbt::NbtErrorKind;
