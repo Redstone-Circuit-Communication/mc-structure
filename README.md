@@ -1,5 +1,7 @@
 # mc-structure
 
+English | [简体中文](README.zh-CN.md)
+
 A parser for Minecraft structure files: **Bedrock `.mcstructure`**, **Java vanilla structures `.nbt`** and **Litematica
 schematics `.litematic`**, all parsed into one structure model. It was written for the submission review of
 [Redstone Archive](https://redstonearchive.top) and is published as a standalone crate.
