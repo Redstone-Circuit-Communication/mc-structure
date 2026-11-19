@@ -1,9 +1,11 @@
-//! Litematica 投影（`.litematic`）的测试。夹具与期望值由独立的 Python 参考实现生成、算出（`tools/litematic.py`，与本库不共享代码：
-//! 它把整个 long 数组当成一个大整数按位切，本库是两个 long 之间移位拼接）。
-//! 另外现场造投影：一个「一位一位放」的打包器（和库里的写法完全不同）覆盖各种调色板大小，再造各种坏文件。
+//! Tests for Litematica schematics (`.litematic`). Fixtures and expected values come from an independent Python reference
+//! implementation (`tools/litematic.py`, which shares no code with this crate: it treats the whole long array as one big integer
+//! and slices bits from it, while this crate shifts and joins neighbouring longs).
+//! Schematics are also built on the fly, with a packer that places one bit at a time (nothing like the crate's own code), to
+//! cover many palette sizes and malformed files.
 
-// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
-// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+// clippy.toml's allow-*-in-tests covers `#[test]` functions and `#[cfg(test)]` modules only; helper functions in integration
+// test files (load, bytes_of, gzip, …) are not "in tests" for clippy 1.94. Test code should panic on failure, so the whole file opts out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use std::io::{Read, Write};
@@ -27,7 +29,7 @@ fn pairs(v: &[(&str, u32)]) -> Vec<(String, u32)> {
     v.iter().map(|(k, n)| ((*k).to_owned(), *n)).collect()
 }
 
-// ───────────────────────── 夹具：期望值全部来自 tools/litematic.py
+// ───────────────────────── Fixtures: every expected value comes from tools/litematic.py
 
 #[test]
 fn door_is_the_same_structure_in_both_formats() {
@@ -39,14 +41,14 @@ fn door_is_the_same_structure_in_both_formats() {
         assert_eq!(lit.edition, Edition::Java);
         assert_eq!(lit.size, nbt.size);
         assert_eq!(lit.block_count(), nbt.block_count());
-        assert_eq!(lit.digest(), nbt.digest(), "{state}：调色板顺序、版本、负尺寸都不该影响摘要");
+        assert_eq!(lit.digest(), nbt.digest(), "{state}: palette order, version and negative sizes must not change the digest");
         assert_eq!(lit.materials(), nbt.materials());
     }
 }
 
 #[test]
 fn door_golden_values() {
-    // 关闭态：第 6 版，正尺寸，Position 不在原点
+    // Closed state: version 6, positive size, Position away from the origin
     let s = load("door_close.litematic");
     assert_eq!(s.format_version, 3953);
     assert_eq!(s.size, [5, 4, 3]);
@@ -60,7 +62,7 @@ fn door_golden_values() {
         ("minecraft:redstone_wire", 1),
     ]);
     assert_eq!(top(&s, 5), want);
-    // 开启态：第 7 版（带 SubVersion），三个轴的 Size 都是负数
+    // Open state: version 7 (with SubVersion), negative Size on all three axes
     let s = load("door_open.litematic");
     assert_eq!(s.size, [5, 4, 3]);
     assert_eq!(s.block_count(), 27);
@@ -73,7 +75,7 @@ fn door_golden_values() {
         ("minecraft:observer", 1),
     ]);
     assert_eq!(top(&s, 5), want);
-    // 两态的差异：三个活塞变了状态、三个活塞头、红石线、侦测器
+    // Difference between the states: three pistons change state, three piston heads, redstone wire, an observer
     let d = load("door_close.litematic").diff(&s);
     assert_eq!((d.moving, d.total), (8, 27));
 }
@@ -81,10 +83,10 @@ fn door_golden_values() {
 #[test]
 fn door_blocks_are_sorted_and_use_the_unified_palette() {
     let s = load("door_close.litematic");
-    assert!(s.blocks.windows(2).all(|w| w[0].pos < w[1].pos), "按坐标严格升序");
+    assert!(s.blocks.windows(2).all(|w| w[0].pos < w[1].pos), "strictly ascending by position");
     assert!(s.blocks.iter().all(|b| b.extra.is_none()));
     assert!(s.blocks.iter().all(|b| (b.state as usize) < s.palette.len()));
-    // 左下角（0,0,0）是地面的石头
+    // The bottom corner (0,0,0) is the stone floor
     assert_eq!(s.blocks[0].pos, [0, 0, 0]);
     assert_eq!(s.cell_key(&s.blocks[0]), "minecraft:stone");
     assert_eq!(s.origin, None);
@@ -93,7 +95,7 @@ fn door_blocks_are_sorted_and_use_the_unified_palette() {
 #[test]
 fn multi_region_with_overlap_negative_size_and_lying_metadata() {
     let s = load("multi_region.litematic");
-    // Metadata 里写的是 TotalBlocks = 1、EnclosingSize = 1×1×1：不当真，以解码出来的为准
+    // Metadata claims TotalBlocks = 1 and EnclosingSize = 1×1×1; it is ignored in favour of the decoded data
     assert_eq!(s.size, [8, 6, 4]);
     assert_eq!(s.block_count(), 29);
     assert_eq!(hex::encode(s.digest()), "719c8d597fb4ab1fed0a1cebf1a945ff435b321dc9ceb6a4fd886dcae085b2ab");
@@ -101,13 +103,13 @@ fn multi_region_with_overlap_negative_size_and_lying_metadata() {
         top(&s, 5),
         pairs(&[("minecraft:obsidian", 10), ("minecraft:stone", 9), ("minecraft:quartz_block", 6), ("minecraft:dirt", 2), ("minecraft:chest", 1)])
     );
-    // wall 和 base 在 x = 3 重叠：后面的区域覆盖前面的，所以 base 的三块石头被石英盖掉了（石头只剩 9 块）
+    // wall and base overlap at x = 3: the later region wins, so three stone blocks of base are replaced by quartz (9 stone left)
     let at = |p: [u32; 3]| s.blocks.iter().find(|b| b.pos == p).map(|b| s.cell_key(b));
     assert_eq!(at([3, 0, 1]).as_deref(), Some("minecraft:quartz_block"));
     assert_eq!(at([2, 0, 1]).as_deref(), Some("minecraft:stone"));
-    // neg 区域（Size 为负）的最小角在 (6, 3, 2)，(0,0,0) 那一格是箱子
+    // The neg region (negative Size) has its minimum corner at (6, 3, 2); its cell (0,0,0) is a chest
     assert_eq!(at([6, 3, 2]).as_deref(), Some("minecraft:chest[facing=north,type=single,waterlogged=false]"));
-    // 同一个结构压平成一个原版结构，摘要一样
+    // The same structure flattened into a vanilla structure has the same digest
     let flat = load("multi_region_flat.nbt");
     assert_eq!(flat.digest(), s.digest());
     assert_eq!(flat.block_entities.len(), s.block_entities.len());
@@ -116,13 +118,14 @@ fn multi_region_with_overlap_negative_size_and_lying_metadata() {
 #[test]
 fn multi_region_block_entities_and_entities_get_the_region_offset() {
     let s = load("multi_region.litematic");
-    // 方块实体：位置加上区域的偏移（wall 的 (1,1,1) → (4,1,1)，neg 的 (0,0,0) → (6,3,2)），数据里区域内的 x、y、z 不再留
+    // Block entities: positions get the region offset (wall (1,1,1) → (4,1,1), neg (0,0,0) → (6,3,2)) and the region-relative
+    // x, y, z are dropped from the data
     let positions: Vec<[u32; 3]> = s.block_entities.iter().map(|b| b.pos).collect();
     assert_eq!(positions, [[4, 1, 1], [6, 3, 2]]);
     let chest = s.block_entities.iter().find(|b| b.pos == [6, 3, 2]).unwrap();
     assert_eq!(chest.data.get("id").and_then(Tag::as_str), Some("minecraft:chest"));
     assert!(chest.data.get("x").is_none() && chest.data.get("y").is_none() && chest.data.get("z").is_none());
-    // 实体：Pos 是相对区域的浮点坐标，加上区域的偏移（neg 的最小角是 (6, 3, 2)）；其余的键原样
+    // Entities: Pos is relative to the region and gets the region offset (neg starts at (6, 3, 2)); other keys stay as they are
     assert_eq!(s.entities.len(), 1);
     let pos: Vec<f64> = s.entities[0].get("Pos").and_then(Tag::as_list).unwrap().iter().map(|t| if let Tag::Double(d) = t { *d } else { f64::NAN }).collect();
     assert_eq!(pos, [6.5, 3.0, 2.5]);
@@ -132,10 +135,11 @@ fn multi_region_block_entities_and_entities_get_the_region_offset() {
 
 #[test]
 fn real_litematica_export_sunspire_palace() {
-    // Litematica 真导出的文件（站长提供，作者 yeaminist）：第 6 版，单区域 70×46×66，调色板 715 项（每个下标 10 位，跨 long 的边界），1825 个方块实体
+    // A file exported by Litematica itself (author: yeaminist): version 6, one region of 70×46×66, a palette of 715 entries
+    // (10 bits per index, spanning long boundaries), 1825 block entities
     let s = load("sunspire_palace.litematic");
     assert_eq!((s.format, s.format_version, s.size), (Format::Litematic, 5023, [70, 46, 66]));
-    // 和 Litematica 自己写在 Metadata 里的 TotalBlocks（21459）、EnclosingSize（70×46×66）对得上
+    // Matches TotalBlocks (21459) and EnclosingSize (70×46×66) that Litematica itself wrote into Metadata
     assert_eq!(s.block_count(), 21459);
     assert_eq!(hex::encode(s.digest()), "cedd169a7f609de0c09d04f033c77e83aeef528ec05cc84e4b1fe04939ef4cdf");
     let want = pairs(&[
@@ -147,20 +151,21 @@ fn real_litematica_export_sunspire_palace() {
     ]);
     assert_eq!(top(&s, 5), want);
     assert_eq!((s.block_entities.len(), s.entities.len()), (1825, 0));
-    // 格子顺序对不对：方块实体的坐标是文件里另外记的。顺序对，它们所在的格子解出来都是带方块实体的方块（架子、告示牌、木桶、箱子……）；
-    // 顺序错了（比如 x、y 互换），1825 个里有 1629 个会落在空气上
+    // Checks the cell order against the block entity positions, which the file records separately: with the right order every one
+    // lands on a block that has a block entity (shelf, sign, barrel, chest, …); with a wrong order (x and y swapped, say)
+    // 1629 of the 1825 land on air
     let occupied: std::collections::HashSet<[u32; 3]> = s.blocks.iter().map(|b| b.pos).collect();
     let on_air = s.block_entities.iter().filter(|be| !occupied.contains(&be.pos)).count();
-    assert_eq!(on_air, 0, "方块实体落在空气上：格子顺序不对");
+    assert_eq!(on_air, 0, "block entities on air: wrong cell order");
 }
 
 #[test]
 fn palettes_that_cross_long_boundaries() {
-    // 17 项 → 每个下标 5 位（105 个下标 = 525 位，跨 long 的边界很多次）
+    // 17 entries → 5 bits per index (105 indices = 525 bits, crossing long boundaries many times)
     let s = load("palette17.litematic");
     assert_eq!((s.size, s.block_count()), ([7, 5, 3], 98));
     assert_eq!(hex::encode(s.digest()), "ddea78ff5bd9cb157fbe743d15836941045fd5434505b55067d5d28a043bcb8c");
-    // 正好 64 项（2 的 6 次方）→ 6 位，64 不是 6 的倍数，同样跨边界
+    // Exactly 64 entries (2^6) → 6 bits; 64 is not a multiple of 6, so indices cross boundaries too
     let s = load("palette64.litematic");
     assert_eq!((s.size, s.block_count()), ([5, 4, 4], 79));
     assert_eq!(hex::encode(s.digest()), "be74d993a9eb2d66a3a8f6928ffbb1fcd7bd452be5ec1d0206bc30aa3304afc4");
@@ -168,15 +173,15 @@ fn palettes_that_cross_long_boundaries() {
 
 #[test]
 fn parsed_by_content_not_by_extension() {
-    // 把投影改名成 .nbt：照内容解析，格式以内容为准
+    // A schematic renamed to .nbt: parsed by content, and the format reports the content
     let lit = bytes_of("door_close.litematic");
     let s = parse(&lit, Some("door.nbt"), &Limits::default()).unwrap();
     assert_eq!(s.format, Format::Litematic);
-    // 反过来：原版结构改名成 .litematic
+    // The other way round: a vanilla structure renamed to .litematic
     let nbt = bytes_of("door_close.nbt");
     let s = parse(&nbt, Some("door.litematic"), &Limits::default()).unwrap();
     assert_eq!(s.format, Format::JavaStructure);
-    // 没有文件名也行（gzip 一定是 Java）
+    // Works without a file name too (gzip always means Java)
     assert_eq!(parse(&lit, None, &Limits::default()).unwrap().format, Format::Litematic);
 }
 
@@ -187,7 +192,7 @@ fn uncompressed_litematic_needs_the_extension_to_be_recognised() {
     let s = parse(&raw, Some("door.litematic"), &Limits::default()).unwrap();
     assert_eq!(s.format, Format::Litematic);
     assert_eq!(hex::encode(s.digest()), "fef504d3bec3fd5d6db0bc69bc4318b52243ecf41a8d139d7f0b5076fdfbad33");
-    // 未压缩又没有后缀：看不出版本，不猜
+    // Uncompressed and without an extension: the edition cannot be told, so no guess is made
     assert!(matches!(parse(&raw, None, &Limits::default()), Err(Error::UnknownFormat)));
 }
 
@@ -205,7 +210,7 @@ fn inflate_limit_applies_to_litematic_too() {
     assert!(matches!(e, Error::TooLarge(_)), "{e}");
 }
 
-// ───────────────────────── 现场造投影
+// ───────────────────────── Schematics built on the fly
 
 fn s(v: &str) -> Tag {
     Tag::String(v.into())
@@ -223,7 +228,7 @@ fn palette_tag(names: &[&str]) -> Tag {
     Tag::List(names.iter().map(|n| compound(vec![("Name", s(n))])).collect())
 }
 
-/// 每个下标占的位数：`max(2, ceil(log2(n)))`，用循环算（不用库里的前导零写法）。
+/// Bits per index, `max(2, ceil(log2(n)))`, computed with a loop (not the leading-zeros approach of the crate).
 fn bits_of(palette_len: usize) -> u32 {
     let mut bits = 2;
     while (1usize << bits) < palette_len {
@@ -232,8 +237,8 @@ fn bits_of(palette_len: usize) -> u32 {
     bits
 }
 
-/// 紧密打包：下标 i 从第 i·bits 位开始，跨 long 的边界接着放，第一个 long 的最低位是第 0 位。
-/// 一位一位地放，不用任何移位拼接——和库里的写法完全不同。
+/// Tight packing: index i starts at bit i·bits and continues across long boundaries; bit 0 is the lowest bit of the first long.
+/// Places one bit at a time, without any shift-and-join, so it shares nothing with the crate's implementation.
 fn pack(indices: &[u64], bits: u32) -> Vec<i64> {
     let mut stream: Vec<bool> = Vec::new();
     for v in indices {
@@ -303,7 +308,7 @@ fn every_palette_size_round_trips_through_an_independent_packer() {
         let names: Vec<String> = (0..n).map(|k| if k == 0 { "minecraft:air".to_owned() } else { format!("minecraft:b{k}") }).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let indices: Vec<u64> = (0..volume).map(|i| ((i * 7 + 3) % n) as u64).collect();
-        // 期望：下标不是 0（空气）的格子；x 最快、然后 z、然后 y
+        // Expected: every cell whose index is not 0 (air); x varies fastest, then z, then y
         let mut want: Vec<([u32; 3], String)> = Vec::new();
         for (i, v) in indices.iter().enumerate() {
             if *v != 0 {
@@ -312,19 +317,19 @@ fn every_palette_size_round_trips_through_an_independent_packer() {
             }
         }
         want.sort();
-        // 正尺寸，和 Size 全为负、Position 在最大角的同一个区域，读出来要一样
+        // A positive size and the same region described with negative Size and Position at the maximum corner must read the same
         for (position, size) in [([0, 0, 0], [6, 5, 4]), ([9, 8, 7], [-6, -5, -4])] {
             let st = parse_default(&one(region(position, size, &refs, &indices))).unwrap();
-            assert_eq!(st.size, [6, 5, 4], "调色板 {n} 项");
+            assert_eq!(st.size, [6, 5, 4], "palette of {n} entries");
             let got: Vec<([u32; 3], String)> = st.cells().collect();
-            assert_eq!(got, want, "调色板 {n} 项，Size {size:?}");
+            assert_eq!(got, want, "palette of {n} entries, Size {size:?}");
         }
     }
 }
 
 #[test]
 fn regions_merge_and_air_never_overrides() {
-    // a：1×1×1 的石头；b：同一格，空气 → 石头还在。c：同一格，泥土 → 盖掉石头
+    // a: 1×1×1 of stone; b: same cell, air → the stone stays. c: same cell, dirt → replaces the stone
     let air_stone = ["minecraft:air", "minecraft:stone"];
     let air_dirt = ["minecraft:air", "minecraft:dirt"];
     let a = region([0, 0, 0], [1, 1, 1], &air_stone, &[1]);
@@ -334,10 +339,10 @@ fn regions_merge_and_air_never_overrides() {
     assert_eq!(st.cells().collect::<Vec<_>>(), [([0, 0, 0], "minecraft:stone".to_owned())]);
     let st = parse_default(&file(vec![("a".into(), a), ("b".into(), b), ("c".into(), c.clone())])).unwrap();
     assert_eq!(st.cells().collect::<Vec<_>>(), [([0, 0, 0], "minecraft:dirt".to_owned())]);
-    // 三个区域的调色板合并：air 在三个里都有、dirt 在 b 和 c 里都有，统一调色板里各只留一份
-    assert_eq!(st.palette.len(), 3, "air、stone、dirt 各一份");
+    // Merging the three palettes: air is in all three, dirt in b and c; the merged palette has each once
+    assert_eq!(st.palette.len(), 3, "air, stone and dirt once each");
     assert_eq!(st.palette.iter().filter(|p| p.name == "minecraft:dirt").count(), 1);
-    // 顺序倒过来：泥土在前、石头在后，石头盖掉泥土
+    // Reversed order: dirt first, stone last, so the stone replaces the dirt
     let a2 = region([0, 0, 0], [1, 1, 1], &air_stone, &[1]);
     let st = parse_default(&file(vec![("c".into(), c), ("a".into(), a2)])).unwrap();
     assert_eq!(st.cells().collect::<Vec<_>>(), [([0, 0, 0], "minecraft:stone".to_owned())]);
@@ -345,7 +350,7 @@ fn regions_merge_and_air_never_overrides() {
 
 #[test]
 fn regions_far_apart_take_the_bounding_box() {
-    // 两个 1×1×1 的区域，一个在原点、一个在 (5, -2, 3)：范围是 6×3×4，最小角移到 0
+    // Two 1×1×1 regions, one at the origin and one at (5, -2, 3): the bounds are 6×3×4 with the minimum corner moved to 0
     let pal = ["minecraft:air", "minecraft:stone"];
     let a = region([0, 0, 0], [1, 1, 1], &pal, &[1]);
     let b = region([5, -2, 3], [1, 1, 1], &pal, &[1]);
@@ -355,7 +360,7 @@ fn regions_far_apart_take_the_bounding_box() {
     assert_eq!(cells, [[0, 2, 0], [5, 0, 3]]);
 }
 
-// ───────────────────────── 坏文件
+// ───────────────────────── Malformed files
 
 fn expect_invalid(bytes: &[u8], needle: &str) {
     let e = parse_default(bytes).unwrap_err();
@@ -367,14 +372,14 @@ fn expect_invalid(bytes: &[u8], needle: &str) {
 fn short_block_states_is_an_error_but_extra_longs_are_ignored() {
     let pal = ["minecraft:air", "minecraft:stone"];
     let good = pack(&[1u64; 24], 2);
-    // 少了就是缺数据
+    // Too few longs means missing data
     let mut short = good.clone();
     short.pop();
     for longs in [short, vec![]] {
         let bytes = one(region_with([0, 0, 0], [4, 3, 2], palette_tag(&pal), Tag::LongArray(longs)));
         expect_invalid(&bytes, "Regions.r.BlockStates");
     }
-    // 多出来的 long 不管：Litematica 写的正好是这么多，别的工具可能补零（站长以前的项目也是这样读的）
+    // Extra longs are ignored: Litematica writes exactly as many as needed, other tools may pad with zeros
     let mut extra = good;
     extra.push(0);
     let st = parse_default(&one(region_with([0, 0, 0], [4, 3, 2], palette_tag(&pal), Tag::LongArray(extra)))).unwrap();
@@ -383,7 +388,7 @@ fn short_block_states_is_an_error_but_extra_longs_are_ignored() {
 
 #[test]
 fn block_entities_key_is_accepted_too() {
-    // 方块实体的键名一般是 TileEntities，也见过 BlockEntities
+    // The block entity key is usually TileEntities, sometimes BlockEntities
     let pal = ["minecraft:air", "minecraft:chest"];
     let Tag::Compound(Compound(mut parts)) = region([5, 0, 0], [2, 1, 1], &pal, &[0, 1]) else { unreachable!() };
     let chest = compound(vec![("x", Tag::Int(1)), ("y", Tag::Int(0)), ("z", Tag::Int(0)), ("id", s("minecraft:chest"))]);
@@ -396,28 +401,28 @@ fn block_entities_key_is_accepted_too() {
 
 #[test]
 fn palette_index_out_of_range_is_an_error() {
-    // 3 项的调色板（2 位，能写出下标 3），但有一格写了 3
+    // A palette of 3 entries (2 bits, so index 3 can be written), with one cell set to 3
     let pal = ["minecraft:air", "minecraft:stone", "minecraft:dirt"];
     let bytes = one(region_with([0, 0, 0], [2, 1, 1], palette_tag(&pal), Tag::LongArray(pack(&[1, 3], 2))));
-    expect_invalid(&bytes, "越界");
+    expect_invalid(&bytes, "out of range");
 }
 
 #[test]
 fn missing_or_wrong_typed_parts_are_errors() {
     let pal = ["minecraft:air", "minecraft:stone"];
     let long = || Tag::LongArray(pack(&[1], 2));
-    // 没有调色板、调色板是空的、BlockStates 不是 LongArray、缺 Position、缺 Size
+    // No palette, an empty palette, BlockStates not a LongArray, Position missing, Size missing
     let no_palette = compound(vec![("Position", xyz(0, 0, 0)), ("Size", xyz(1, 1, 1)), ("BlockStates", long())]);
     expect_invalid(&one(no_palette), "Regions.r.BlockStatePalette");
-    expect_invalid(&one(region_with([0, 0, 0], [1, 1, 1], Tag::List(vec![]), long())), "调色板是空的");
+    expect_invalid(&one(region_with([0, 0, 0], [1, 1, 1], Tag::List(vec![]), long())), "palette is empty");
     expect_invalid(&one(region_with([0, 0, 0], [1, 1, 1], palette_tag(&pal), Tag::IntArray(vec![1]))), "LongArray");
     let no_pos = compound(vec![("Size", xyz(1, 1, 1)), ("BlockStatePalette", palette_tag(&pal)), ("BlockStates", long())]);
     expect_invalid(&one(no_pos), "Regions.r.Position");
     let no_size = compound(vec![("Position", xyz(0, 0, 0)), ("BlockStatePalette", palette_tag(&pal)), ("BlockStates", long())]);
     expect_invalid(&one(no_size), "Regions.r.Size");
-    // 区域本身不是复合标签；一个区域都没有
+    // A region that is not a compound; no regions at all
     expect_invalid(&file(vec![("r".into(), Tag::Int(1))]), "Regions.r");
-    expect_invalid(&file(vec![]), "没有任何区域");
+    expect_invalid(&file(vec![]), "no regions");
 }
 
 #[test]
@@ -437,17 +442,17 @@ fn oversized_regions_are_rejected_before_decoding() {
         assert!(matches!(e, Error::TooLarge(_)), "{e}");
     };
     let limits = Limits::default();
-    // 单轴超过上限、尺寸为 0（BlockStates 是空的也不会去分配或解码）
+    // An axis over the limit, a size of 0 (an empty BlockStates is neither allocated nor decoded)
     too_large(one(region_with([0, 0, 0], [20_000, 1, 1], palette_tag(&pal), Tag::LongArray(vec![]))), &limits);
     too_large(one(region_with([0, 0, 0], [0, 1, 1], palette_tag(&pal), Tag::LongArray(vec![]))), &limits);
     too_large(one(region_with([0, 0, 0], [i32::MIN, 1, 1], palette_tag(&pal), Tag::LongArray(vec![]))), &limits);
-    // 体积超过元素上限
+    // Volume over the element limit
     let small = Limits { max_elements: 100, ..Limits::default() };
     too_large(one(region_with([0, 0, 0], [10, 10, 2], palette_tag(&pal), Tag::LongArray(vec![]))), &small);
-    // 每个区域都不超，加起来超（6×6×2 = 72，两个 144 > 100）
+    // Each region is within the limit but together they exceed it (6×6×2 = 72, two of them 144 > 100)
     let r = || region_with([0, 0, 0], [6, 6, 2], palette_tag(&pal), Tag::LongArray(pack(&[1u64; 72], 2)));
     too_large(file(vec![("a".into(), r()), ("b".into(), r())]), &small);
-    // 两个很远的区域：各自都小，范围合起来超过单轴上限
+    // Two distant regions: each small, but their combined bounds exceed the axis limit
     let far = file(vec![("a".into(), region([0, 0, 0], [1, 1, 1], &pal, &[1])), ("b".into(), region([20_000, 0, 0], [1, 1, 1], &pal, &[1]))]);
     too_large(far, &limits);
 }
@@ -462,17 +467,17 @@ fn too_many_regions_are_rejected() {
 
 #[test]
 fn other_java_nbt_is_not_a_litematic() {
-    // 有 Regions 但不是复合标签，也没有原版结构的任何键：不认识
+    // Regions that is not a compound and none of the vanilla structure keys: unrecognized
     let root = Compound(vec![("Regions".into(), Tag::List(vec![])), ("MinecraftDataVersion".into(), Tag::Int(1))]);
     assert!(matches!(parse_default(&file_from(root)), Err(Error::UnknownFormat)));
-    // Sponge .schem 的根
+    // The root of a Sponge .schem
     let schem = Compound(vec![("Version".into(), Tag::Int(2)), ("Width".into(), Tag::Short(1)), ("Palette".into(), Tag::Compound(Compound(vec![])))]);
     assert!(matches!(parse_default(&file_from(schem)), Err(Error::UnknownFormat)));
 }
 
 #[test]
 fn missing_data_version_is_tolerated_as_zero() {
-    // 老版本的投影没有 MinecraftDataVersion：照样是投影，format_version 记 0
+    // Old schematics have no MinecraftDataVersion: still a schematic, with format_version 0
     let pal = ["minecraft:air", "minecraft:stone"];
     let root = Compound(vec![("Regions".into(), Tag::Compound(Compound(vec![("r".into(), region([0, 0, 0], [1, 1, 1], &pal, &[1]))])))]);
     let st = parse_default(&file_from(root)).unwrap();

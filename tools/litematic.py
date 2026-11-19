@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Litematica 投影（.litematic）与原版结构（.nbt）的独立参考实现：写（造夹具）、读（算黄金值）。与 mc-structure 不共享代码。
+"""Independent reference implementation for Litematica schematics (.litematic) and vanilla structures (.nbt): writing (to build
+fixtures) and reading (to compute golden values). Shares no code with mc-structure.
 
-  python3 litematic.py gen  <目录>      重新生成夹具（tests/fixtures 下的 door_*、multi_region*、palette*）
-  python3 litematic.py read <文件...>   读 .litematic / .nbt，每个文件输出一行 JSON：格式、尺寸、方块数、摘要、材料前五……
+  python3 litematic.py gen  <dir>       regenerate the fixtures (door_*, multi_region*, palette* in tests/fixtures)
+  python3 litematic.py read <file...>   read .litematic / .nbt files and print one JSON line per file: format, size, block count,
+                                        digest, top five materials, …
 
-规范化规则（摘要、空气）与 mc-structure 的 Structure::digest 相同（也见 golden.py）。
-读投影时位打包用「把整个 long 数组当成一个大整数、按位切」的办法解出来——和 Rust 里「两个 long 之间移位拼接」的写法完全不同，
-所以两边读出来一致才有意义。"""
+Normalization (digest, air) follows mc-structure's Structure::digest (see also golden.py).
+Bit-packed block states are decoded by treating the whole long array as one big integer and slicing bits from it, which is
+nothing like the shift-and-join between neighbouring longs in the Rust code, so agreement between the two is meaningful."""
 import gzip
 import hashlib
 import json
@@ -16,8 +18,8 @@ import sys
 
 EMPTY = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air", "minecraft:structure_void"}
 
-# ───────────────────────── NBT（Java：大端；夹具里只有 BMP 字符，UTF-8 与修改版 UTF-8 一样）
-# 一个标签是 (类型号, 值)；列表的值是 (元素类型号, [元素的裸值])；复合标签的值是 dict（保持写入顺序）
+# ───────────────────────── NBT (Java: big-endian; the fixtures only use BMP characters, for which UTF-8 and modified UTF-8 agree)
+# A tag is (type id, value); a list value is (element type id, [raw element values]); a compound value is a dict (insertion order)
 
 
 def tb(v): return (1, v)
@@ -130,9 +132,9 @@ def load(path):
 
 
 def gz(raw):
-    return gzip.compress(raw, compresslevel=9, mtime=0)  # 固定 mtime：夹具每次生成都一样
+    return gzip.compress(raw, compresslevel=9, mtime=0)  # fixed mtime so fixtures are reproducible
 
-# ───────────────────────── 方块状态与摘要（规则同 mc-structure）
+# ───────────────────────── Block states and digest (same rules as mc-structure)
 
 
 def state_str(name, props):
@@ -142,7 +144,7 @@ def state_str(name, props):
 
 
 def digest_of(size, cells):
-    """cells: {(x,y,z): 规范写法}（只含非空格子）"""
+    """cells: {(x,y,z): canonical spelling} (non-empty cells only)"""
     h = hashlib.sha256(f"{size[0]}x{size[1]}x{size[2]}\n".encode())
     for (x, y, z), s in sorted(cells.items()):
         h.update(f"{x},{y},{z} {s}\n".encode())
@@ -159,7 +161,7 @@ def summary(fmt, version, size, cells, extra):
     out.update(extra)
     return out
 
-# ───────────────────────── 读（参考实现）
+# ───────────────────────── Reading (reference implementation)
 
 
 def _props(entry):
@@ -200,8 +202,8 @@ def read_litematic(root):
         bits = max(2, (len(pal) - 1).bit_length())
         vol = dims[0] * dims[1] * dims[2]
         longs = rd["BlockStates"][1]
-        assert len(longs) >= (vol * bits + 63) // 64, f"{name}: BlockStates 不够长"
-        big = int.from_bytes(b"".join(struct.pack("<q", v) for v in longs), "little")  # 整个数组当一个大整数，第一个 long 的最低位是第 0 位
+        assert len(longs) >= (vol * bits + 63) // 64, f"{name}: BlockStates too short"
+        big = int.from_bytes(b"".join(struct.pack("<q", v) for v in longs), "little")  # the whole array as one integer; bit 0 is the lowest bit of the first long
         mask = (1 << bits) - 1
         for i in range(vol):
             idx = (big >> (i * bits)) & mask
@@ -209,7 +211,7 @@ def read_litematic(root):
             n, props = pal[idx]
             if n in EMPTY:
                 continue
-            cells[(mn[0] + x - lo[0], mn[1] + y - lo[1], mn[2] + z - lo[2])] = state_str(n, props)  # 后面的区域覆盖前面的
+            cells[(mn[0] + x - lo[0], mn[1] + y - lo[1], mn[2] + z - lo[2])] = state_str(n, props)  # later regions win
         for te in rd.get("BlockEntities", rd.get("TileEntities", (9, (10, []))))[1][1]:
             bes.append((mn[0] + te["x"][1] - lo[0], mn[1] + te["y"][1] - lo[1], mn[2] + te["z"][1] - lo[2]))
         ents += len(rd.get("Entities", (9, (10, [])))[1][1])
@@ -221,11 +223,11 @@ def read_any(path):
     root = load(path)
     return read_litematic(root) if "Regions" in root else read_vanilla(root)
 
-# ───────────────────────── 写（造夹具）
+# ───────────────────────── Writing (fixture builders)
 
 
 def pack_bits(indices, bits):
-    """紧密打包：下标 i 从第 i*bits 位开始，跨 long 的边界接着放；返回有符号 long 的列表。"""
+    """Tight packing: index i starts at bit i*bits and continues across long boundaries; returns a list of signed longs."""
     big = 0
     for i, v in enumerate(indices):
         assert 0 <= v < (1 << bits)
@@ -252,7 +254,8 @@ def palette_tag(palette):
 
 
 def region(position, size, palette, cells, tiles=(), ents=()):
-    """cells: {(x,y,z): 调色板下标}，坐标相对区域的最小角；没写的格子是 0 号。tiles: [(x,y,z,{其余键})]；ents: [{...}]"""
+    """cells: {(x,y,z): palette index}, relative to the region's minimum corner; missing cells are index 0.
+    tiles: [(x,y,z,{other keys})]; ents: [{...}]"""
     dx, dy, dz = abs(size[0]), abs(size[1]), abs(size[2])
     bits = max(2, (len(palette) - 1).bit_length())
     idx = [0] * (dx * dy * dz)
@@ -275,7 +278,7 @@ def region(position, size, palette, cells, tiles=(), ents=()):
 def litematic(version, regions, data_version=3953, lies=False):
     meta = {"Name": tstr("fixture"), "Author": tstr("rsw"), "Description": tstr(""), "RegionCount": ti(len(regions)),
             "TotalBlocks": ti(1 if lies else 0), "TotalVolume": ti(1 if lies else 0), "EnclosingSize": xyz(1, 1, 1) if lies else xyz(0, 0, 0),
-            "TimeCreated": tl(0), "TimeModified": tl(0)}  # lies：元数据故意写错，解析器不该当真
+            "TimeCreated": tl(0), "TimeModified": tl(0)}  # lies: deliberately wrong metadata that the parser must ignore
     root = {"MinecraftDataVersion": ti(data_version), "Version": ti(version)}
     if version >= 7:
         root["SubVersion"] = ti(1)
@@ -285,7 +288,8 @@ def litematic(version, regions, data_version=3953, lies=False):
 
 
 def vanilla(size, palette, cells, data_version=3953, block_nbt=None):
-    """原版结构：把盒子里的每一格都写进 blocks（空气也写）；cells: {(x,y,z): 调色板下标}；block_nbt: {(x,y,z): 复合标签的裸值}"""
+    """Vanilla structure: every cell of the box goes into blocks (air included); cells: {(x,y,z): palette index};
+    block_nbt: {(x,y,z): raw compound value}"""
     block_nbt = block_nbt or {}
     blocks = []
     for x in range(size[0]):
@@ -298,7 +302,7 @@ def vanilla(size, palette, cells, data_version=3953, block_nbt=None):
     root = {"DataVersion": ti(data_version), "size": tlist(3, list(size)), "palette": palette_tag(palette), "blocks": tlist(10, blocks), "entities": tlist(10, [])}
     return gz(write_nbt(tcomp(root)))
 
-# ───────────────────────── 夹具的内容
+# ───────────────────────── Fixture contents
 
 AIR = ("minecraft:air", {})
 STONE = ("minecraft:stone", {})
@@ -315,7 +319,7 @@ DOOR_SIZE = (5, 4, 3)
 
 
 def door_cells(opened):
-    """{(x,y,z): 状态}，坐标 0 起"""
+    """{(x,y,z): state}, zero-based positions"""
     c = {}
     for x in range(5):
         for z in range(3):
@@ -337,7 +341,7 @@ def skey(s):
 
 
 def uniq(states):
-    """去重（状态里有 dict，不能直接放进 set），按名字与属性排序"""
+    """Deduplicates (states contain dicts, so a set cannot be used directly) and sorts by name and properties"""
     return sorted({skey(s): s for s in states}.values(), key=skey)
 
 
@@ -347,13 +351,14 @@ def indexed(cells, palette):
 
 def door_files(opened):
     cells = door_cells(opened)
-    # 原版结构：调色板按首次出现的顺序；litematic：空气在 0 号，其余按名字倒序——两边的调色板顺序不一样
+    # Vanilla structure: palette in order of first appearance; litematic: air at index 0, the rest in reverse name order, so the
+    # two palettes are ordered differently
     vp = [AIR] + uniq(cells.values())
     lp = [AIR] + uniq(cells.values())[::-1]
     nbt = vanilla(DOOR_SIZE, vp, indexed(cells, vp))
-    if opened:  # 开启态：第 7 版、负尺寸（Position 在最大角，区域往负方向延伸）
+    if opened:  # open state: version 7, negative size (Position at the maximum corner, extending in the negative direction)
         lit = litematic(7, [("door", region((4, 3, 2), (-5, -4, -3), lp, indexed(cells, lp)))])
-    else:       # 关闭态：第 6 版、正尺寸、Position 不在原点
+    else:       # closed state: version 6, positive size, Position away from the origin
         lit = litematic(6, [("door", region((3, 5, 7), (5, 4, 3), lp, indexed(cells, lp)))])
     return nbt, lit
 
@@ -365,7 +370,8 @@ OBSIDIAN = ("minecraft:obsidian", {})
 
 
 def multi_region():
-    """三个区域：base（正尺寸）、wall（和 base 在 x=3 重叠、后面的覆盖前面的）、neg（负尺寸、带方块实体与实体）。各自的调色板不一样。"""
+    """Three regions: base (positive size), wall (overlaps base at x=3; the later region wins) and neg (negative size, with
+    block entities and entities). Each has its own palette."""
     base_p = [AIR, STONE, DIRT]
     base = {(x, 0, z): 1 for x in range(4) for z in range(3)}
     base[(1, 1, 1)] = 2
@@ -375,7 +381,7 @@ def multi_region():
     wall[(1, 1, 1)] = 2
     neg_p = [AIR, OBSIDIAN, CHEST]
     neg = {(x, y, z): 1 for x in range(2) for y in range(3) for z in range(2)}
-    del neg[(1, 2, 1)]  # 一个空气
+    del neg[(1, 2, 1)]  # one air cell
     neg[(0, 0, 0)] = 2
     sign_te = {"id": tstr("minecraft:sign"), "front_text": tcomp({"has_glowing_text": tb(0)}), "is_waxed": tb(0)}
     chest_te = {"id": tstr("minecraft:chest"), "Items": tlist(10, [])}
@@ -386,7 +392,7 @@ def multi_region():
         ("neg", region((7, 5, 3), (-2, -3, -2), neg_p, neg, tiles=[(0, 0, 0, chest_te)], ents=[stand])),
     ]
     lit = litematic(6, regions, lies=True)
-    # 同样的结构压平成一个原版结构（独立地叠一遍：后面的覆盖前面的；方块实体也带上）
+    # The same structure flattened into a vanilla structure (layered independently: later regions win; block entities included)
     flat = {}
     for (px, py, pz), (cells, pal) in [((0, 0, 0), (base, base_p)), ((3, 0, 0), (wall, wall_p)), ((6, 3, 2), (neg, neg_p))]:
         for (x, y, z), v in cells.items():
@@ -398,7 +404,8 @@ def multi_region():
 
 
 def many(palette_size, size, step, add):
-    """调色板很大的区域：下标按 (i*step+add) % palette_size 循环；名字用中继器的 64 种状态加空气，凑到想要的大小"""
+    """A region with a large palette: indices cycle through (i*step+add) % palette_size; the palette is air plus repeater
+    states (64 of them), cut to the requested size"""
     states = [AIR]
     for delay in "1234":
         for facing in ("north", "south", "east", "west"):
@@ -423,8 +430,8 @@ def gen(out):
         files[f"door_{name}.nbt"], files[f"door_{name}.litematic"] = nbt, lit
     lit, flat = multi_region()
     files["multi_region.litematic"], files["multi_region_flat.nbt"] = lit, flat
-    files["palette17.litematic"] = many(17, (7, 5, 3), 7, 3)    # 5 位：105 个下标 = 525 位，跨 long 的边界很多次
-    files["palette64.litematic"] = many(64, (5, 4, 4), 5, 1)    # 正好 2 的 6 次方：6 位，64 不是 6 的倍数，也跨边界
+    files["palette17.litematic"] = many(17, (7, 5, 3), 7, 3)    # 5 bits: 105 indices = 525 bits, crossing long boundaries many times
+    files["palette64.litematic"] = many(64, (5, 4, 4), 5, 1)    # exactly 2^6: 6 bits; 64 is not a multiple of 6, so indices cross boundaries too
     for name, data in files.items():
         with open(os.path.join(out, name), "wb") as f:
             f.write(data)
@@ -434,7 +441,7 @@ def gen(out):
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "gen":
         for n in gen(sys.argv[2]):
-            print("写了", n)
+            print("wrote", n)
     elif len(sys.argv) >= 3 and sys.argv[1] == "read":
         for p in sys.argv[2:]:
             print(os.path.basename(p), json.dumps(read_any(p), ensure_ascii=False))

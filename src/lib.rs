@@ -1,22 +1,23 @@
-//! Minecraft 结构文件解析。
+//! Parsing of Minecraft structure files.
 //!
-//! | 版本 | 格式 | 文件 |
+//! | Edition | Format | Produced by |
 //! | --- | --- | --- |
-//! | 基岩版 | `.mcstructure`（未压缩的小端 NBT；`format_version` 1、2） | 结构方块「导出」 |
-//! | Java 版 | 原版结构（gzip 压缩的大端 NBT） | 结构方块「保存」到 `generated/<ns>/structures/*.nbt` |
-//! | Java 版 | Litematica 投影 `.litematic`（gzip 压缩的大端 NBT；一个或多个区域，位压缩的方块） | Litematica 模组保存的投影 |
+//! | Bedrock | `.mcstructure` (uncompressed little-endian NBT; `format_version` 1 and 2) | The structure block's "Export" |
+//! | Java | Vanilla structure (gzip-compressed big-endian NBT) | The structure block's "Save", to `generated/<ns>/structures/*.nbt` |
+//! | Java | Litematica schematic `.litematic` (gzip-compressed big-endian NBT; one or more regions, bit-packed blocks) | The Litematica mod |
 //!
-//! 三种格式解析到同一个 [`Structure`]：调色板 + 非空方块（按坐标排序）+ 方块实体 + 实体。
-//! 同一个结构存成 `.nbt` 或 `.litematic`，[`Structure::digest`]、[`Structure::block_count`]、[`Structure::materials`] 都一样。
-//! 方块名保持各自版本的原样（基岩是基岩的 id，Java 是 Java 的 id），**本库不做版本之间的方块映射**。
+//! All three formats parse into the same [`Structure`]: a palette, the non-air blocks (sorted by position), block entities and entities.
+//! The same structure saved as `.nbt` or as `.litematic` gives the same [`Structure::digest`], [`Structure::block_count`] and [`Structure::materials`].
+//! Block names stay as each edition spells them (Bedrock ids for Bedrock, Java ids for Java); **this crate does not map blocks between editions**.
 //!
-//! 输入不可信：所有长度先对照剩余字节与元素预算再分配，嵌套深度、元素总数、解压大小、各轴尺寸都有上限
-//! （[`Limits`]）；错误带字节偏移与 NBT 路径（如 `structure.block_indices[0]`）。解析路径上不 panic。
+//! Input is treated as untrusted: every length is checked against the remaining bytes and the element budget before anything is
+//! allocated, and nesting depth, element count, decompressed size and the size of each axis are capped ([`Limits`]). Errors carry
+//! the byte offset and the NBT path (such as `structure.block_indices[0]`). Nothing on the parse path panics.
 //!
 //! ```no_run
 //! let bytes = std::fs::read("door_close.mcstructure").unwrap();
 //! let s = mc_structure::parse(&bytes, Some("door_close.mcstructure"), &mc_structure::Limits::default()).unwrap();
-//! println!("{:?} {:?} 共 {} 个方块", s.edition, s.size, s.block_count());
+//! println!("{:?} {:?}, {} blocks", s.edition, s.size, s.block_count());
 //! for (name, n) in s.materials().iter().take(5) {
 //!     println!("{name} × {n}");
 //! }
@@ -32,42 +33,47 @@ mod structure;
 pub use error::Error;
 pub use structure::{Block, BlockEntity, BlockState, Edition, FormDiff, Format, StateValue, Structure};
 
-/// 资源上限。默认值与红石阁旧后端一致。
+/// Resource limits. The defaults accept everything a structure block can save, including large Bedrock files in the old format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// NBT 嵌套深度
+    /// NBT nesting depth.
     pub max_depth: u32,
-    /// 元素总数（每个标签算 1，数组与列表按长度算），也是体积 x·y·z 的上限
+    /// Total element count (each tag counts 1, arrays and lists count their length); also the cap on the volume x·y·z.
     pub max_elements: u64,
-    /// 解压后的字节数
+    /// Size after decompression, in bytes.
     pub max_inflated: u64,
-    /// 单轴尺寸
+    /// Size along any one axis.
     pub max_axis: u32,
-    /// 解析出来的标签在内存里最多占多少字节（估算：每个标签本身 32 字节，加上字符串、数组、列表、复合标签在堆上的部分），**分配之前**核对。
-    /// 按字节记，不按个数：线上只占 1 字节的列表元素，在内存里是一个 32 字节的标签，再加上 gzip，几 KB 的文件能变成上百 MB。
+    /// How many bytes the parsed tags may take in memory (estimated as 32 bytes per tag plus the heap part of strings, arrays,
+    /// lists and compounds), checked **before** allocating.
+    /// Counted in bytes rather than elements: a list element that takes 1 byte in the file is a 32-byte tag in memory, so
+    /// together with gzip a file of a few KB could otherwise grow to hundreds of MB.
     pub max_memory: u64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        // 112 MiB：装得下本站上限的旧版基岩文件（format_version 1 的方块下标是 List<Int>：64×384×64 两层，约 96 MiB）
+        // 112 MiB: fits the largest Bedrock file in the old format (format_version 1 stores block indices as a List<Int>;
+        // two layers of 64×384×64 take about 96 MiB)
         Self { max_depth: 64, max_elements: 8_000_000, max_inflated: 64 * 1024 * 1024, max_axis: 10_000, max_memory: 112 * 1024 * 1024 }
     }
 }
 
 impl Limits {
-    /// Java 版两种格式的内存预算（评审 M1）。112 MiB 的默认值是给旧版基岩文件的（方块下标是 `List<Int>`，每个元素在内存里是一个标签）；
-    /// Java 用不着：投影的方块是紧凑的 `LongArray`，原版结构 `.nbt` 每个方块约 250 字节，满 48×48×48 也只要约 27 MiB（`tests/memory.rs` 量着）。
-    /// 压缩过的文件只可能是 Java，几 KB 的 gzip 能让解析占到的内存从约 116 MiB 降到这个数。
+    /// Memory budget for the two Java formats. The 112 MiB default exists for old Bedrock files (block indices are a `List<Int>`,
+    /// with one tag in memory per element). Java needs far less: a Litematica schematic stores its blocks in a compact `LongArray`,
+    /// and a vanilla `.nbt` takes about 250 bytes per block, about 27 MiB for a full 48×48×48 (measured in `tests/memory.rs`).
+    /// Only Java files can be compressed, so this lowers the memory that a few KB of gzip can make the parser use from about
+    /// 116 MiB to this figure.
     pub const JAVA_MAX_MEMORY: u64 = 48 * 1024 * 1024;
 
-    /// Java 版（`.nbt`、`.litematic`）的默认上限：只有内存预算比 [`Limits::default`] 小。
+    /// Default limits for Java (`.nbt`, `.litematic`): the same as [`Limits::default`] except for a smaller memory budget.
     #[must_use]
     pub fn java() -> Self {
         Self { max_memory: Self::JAVA_MAX_MEMORY, ..Self::default() }
     }
 
-    /// 按版本取默认上限：Java 用 [`Limits::java`]，基岩用 [`Limits::default`]。
+    /// Default limits for an edition: [`Limits::java`] for Java, [`Limits::default`] for Bedrock.
     #[must_use]
     pub fn for_edition(edition: Edition) -> Self {
         match edition {
@@ -77,10 +83,12 @@ impl Limits {
     }
 }
 
-/// 按内容（魔数）和文件名判断版本。
+/// Detects the edition from the content (magic bytes) and the file name.
 ///
-/// gzip / zlib 压缩的一定是 Java；未压缩的根复合标签两边长得一样（`0a 00 00`），只能靠文件名区分。
-/// 判断不了返回 `None`，由调用方要求用户说明——不猜（把任意文件交给某个解析器去试只会得到难懂的错误）。
+/// gzip or zlib compression means Java; an uncompressed root compound looks the same in both editions (`0a 00 00`), so only the
+/// file name can tell them apart.
+/// Returns `None` when it cannot tell, leaving it to the caller to ask. It does not guess: handing an arbitrary file to one of the
+/// parsers only produces confusing errors.
 #[must_use]
 pub fn detect(bytes: &[u8], filename: Option<&str>) -> Option<Edition> {
     if is_compressed(bytes) {
@@ -102,7 +110,7 @@ pub(crate) fn is_compressed(bytes: &[u8]) -> bool {
     }
 }
 
-/// 识别并解析。识别不了返回 [`Error::UnknownFormat`]。
+/// Detects the edition and parses. Returns [`Error::UnknownFormat`] when the edition cannot be detected.
 pub fn parse(bytes: &[u8], filename: Option<&str>, limits: &Limits) -> Result<Structure, Error> {
     match detect(bytes, filename) {
         Some(Edition::Bedrock) => parse_bedrock(bytes, limits),
@@ -111,14 +119,16 @@ pub fn parse(bytes: &[u8], filename: Option<&str>, limits: &Limits) -> Result<St
     }
 }
 
-/// 解析基岩版 `.mcstructure`。
+/// Parses a Bedrock `.mcstructure`.
 pub fn parse_bedrock(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
     bedrock::parse(bytes, limits)
 }
 
-/// 解析 Java 版的结构文件：原版结构 `.nbt` 或 Litematica 投影 `.litematic`（gzip、zlib 或未压缩都接受）。
-/// 按**内容**分流，不按扩展名：根上有 `Regions` 的是投影，有 `size`、`blocks`、`palette`、`palettes` 之一的是原版结构，
-/// 都不是（比如 `.schem`）返回 [`Error::UnknownFormat`]。扩展名和内容对不上（把投影改名成 `.nbt`）照内容解析，[`Structure::format`] 以内容为准。
+/// Parses a Java structure file: a vanilla structure `.nbt` or a Litematica schematic `.litematic` (gzip, zlib or uncompressed).
+/// The format is decided by **content**, not by extension: a root with `Regions` is a schematic, a root with any of `size`,
+/// `blocks`, `palette` or `palettes` is a vanilla structure,
+/// and anything else (for example `.schem`) returns [`Error::UnknownFormat`]. When the extension and the content disagree (a schematic
+/// renamed to `.nbt`), the content wins and [`Structure::format`] reports what was actually parsed.
 pub fn parse_java(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
     java::parse(bytes, limits)
 }

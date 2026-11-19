@@ -1,4 +1,4 @@
-"""小端 NBT 参考读取器（只用于生成黄金样本，不进产品）。"""
+"""Little-endian NBT reference reader (used only to produce golden values; not part of the crate)."""
 import struct
 def read(b):
     pos=[0]

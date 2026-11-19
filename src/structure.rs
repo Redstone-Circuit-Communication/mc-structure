@@ -1,4 +1,5 @@
-//! 统一的结构模型与它上面的计算：方块数、材料表、内容摘要、两态差异。
+//! The common structure model and what is computed from it: block count, material list, content digest and the difference
+//! between two states.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -7,12 +8,12 @@ use sha2::{Digest, Sha256};
 
 use crate::nbt::Compound;
 
-/// 版本。
+/// Game edition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Edition {
-    /// Java 版
+    /// Java Edition
     Java,
-    /// 基岩版
+    /// Bedrock Edition
     Bedrock,
 }
 
@@ -27,19 +28,19 @@ impl Edition {
     }
 }
 
-/// 文件格式。
+/// File format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Format {
-    /// Java 版原版结构（`.nbt`）
+    /// Java vanilla structure (`.nbt`)
     JavaStructure,
-    /// Java 版 Litematica 投影（`.litematic`）
+    /// Java Litematica schematic (`.litematic`)
     Litematic,
-    /// 基岩版 `.mcstructure`
+    /// Bedrock `.mcstructure`
     McStructure,
 }
 
 impl Format {
-    /// `nbt` / `litematic` / `mcstructure`（也就是这种文件的扩展名）
+    /// `nbt` / `litematic` / `mcstructure` (the file extension of the format)
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -50,14 +51,14 @@ impl Format {
     }
 }
 
-/// 方块状态的值。基岩的状态有字节、整数、字符串三种；Java 的属性一律是字符串。
+/// A block state value. Bedrock states are bytes, integers or strings; Java properties are always strings.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StateValue {
-    /// 字节（基岩里多是开关：`open_bit = 0`）
+    /// Byte (in Bedrock usually a flag, such as `open_bit = 0`)
     Byte(i8),
-    /// 整数
+    /// Integer
     Int(i32),
-    /// 字符串
+    /// String
     String(String),
 }
 
@@ -71,31 +72,32 @@ impl fmt::Display for StateValue {
     }
 }
 
-/// 调色板里的一项：方块 id 与按键排序的状态。
+/// A palette entry: the block id and its states sorted by key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BlockState {
-    /// 方块 id，保持原版本的写法（`minecraft:sticky_piston`）
+    /// Block id as the edition spells it (`minecraft:sticky_piston`)
     pub name: String,
-    /// 状态，按键排序
+    /// States, sorted by key
     pub states: Vec<(String, StateValue)>,
 }
 
 impl BlockState {
-    /// 构造并把状态按键排序（同一状态只有一种写法）。
+    /// Builds an entry with its states sorted by key, so that each state has exactly one spelling.
     #[must_use]
     pub fn new(name: impl Into<String>, mut states: Vec<(String, StateValue)>) -> Self {
-        // 按 &str 比较：键是借来的，新版 clippy 的 unnecessary_sort_by 不会建议一个要搬走 String 的 sort_by_key
+        // Compare as &str: the keys are borrowed, and this keeps newer clippy (unnecessary_sort_by) from suggesting a
+        // sort_by_key that would have to clone each String
         states.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         Self { name: name.into(), states }
     }
 
-    /// 空气与结构空位：不算方块。
+    /// Air and structure voids, which do not count as blocks.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         matches!(self.name.as_str(), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" | "minecraft:structure_void")
     }
 
-    /// 规范写法：`name` 或 `name[k=v,k=v]`（摘要与两态比较都用它）。
+    /// Canonical spelling, `name` or `name[k=v,k=v]`, used by the digest and by the state comparison.
     #[must_use]
     pub fn key(&self) -> String {
         if self.states.is_empty() {
@@ -106,74 +108,74 @@ impl BlockState {
     }
 }
 
-/// 一个非空的格子。
+/// A non-empty cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Block {
-    /// 结构内的坐标（0 起，`< size`）
+    /// Position inside the structure (zero-based, `< size`)
     pub pos: [u32; 3],
-    /// 调色板下标
+    /// Palette index
     pub state: u32,
-    /// 第二层（基岩的含水层）：这一格同时含有的方块，如水
+    /// Second layer (Bedrock's waterlogging layer): another block in the same cell, such as water
     pub extra: Option<u32>,
 }
 
-/// 方块实体（活塞臂、漏斗、比较器……）。
+/// A block entity (moving piston, hopper, comparator, …).
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockEntity {
-    /// 结构内的坐标
+    /// Position inside the structure
     pub pos: [u32; 3],
-    /// 原样的 NBT
+    /// The NBT as stored
     pub data: Compound,
 }
 
-/// 两态差异（`moving_blocks`）。
+/// Difference between two states (`moving_blocks`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FormDiff {
-    /// 不同的格子数：一边有方块另一边没有，或方块（含状态）不同
+    /// Cells that differ: a block on one side and none on the other, or a different block (states included)
     pub moving: u32,
-    /// 任意一边非空的格子数
+    /// Cells that are non-empty on at least one side
     pub total: u32,
 }
 
 impl FormDiff {
-    /// 不同的比例（0..=1）。
+    /// Share of differing cells (0..=1).
     #[must_use]
     pub fn ratio(&self) -> f64 {
         if self.total == 0 { 0.0 } else { f64::from(self.moving) / f64::from(self.total) }
     }
 }
 
-/// 一个结构。
+/// A structure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Structure {
-    /// 版本
+    /// Edition
     pub edition: Edition,
-    /// 格式
+    /// Format
     pub format: Format,
-    /// Java 为 `DataVersion`；基岩为 `format_version`
+    /// `DataVersion` for Java, `format_version` for Bedrock
     pub format_version: i32,
     /// `[x, y, z]`
     pub size: [u32; 3],
-    /// 基岩的 `structure_world_origin`（导出时的世界坐标）；Java 没有
+    /// Bedrock's `structure_world_origin` (world position at the time of export); Java has none
     pub origin: Option<[i32; 3]>,
-    /// 调色板（原样，含空气）
+    /// Palette as stored, including air
     pub palette: Vec<BlockState>,
-    /// 非空格子，按坐标排序
+    /// Non-empty cells, sorted by position
     pub blocks: Vec<Block>,
-    /// 方块实体
+    /// Block entities
     pub block_entities: Vec<BlockEntity>,
-    /// 实体（原样的 NBT）
+    /// Entities (NBT as stored)
     pub entities: Vec<Compound>,
 }
 
 impl Structure {
-    /// 非空方块数。
+    /// Number of non-air blocks.
     #[must_use]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
 
-    /// 一格的规范写法：主方块，含水层用 `+` 接在后面。
+    /// Canonical spelling of a cell: the main block, followed by the waterlogging layer after a `+`.
     #[must_use]
     pub fn cell_key(&self, b: &Block) -> String {
         let key = |i: u32| self.palette.get(i as usize).map_or_else(|| format!("#{i}"), BlockState::key);
@@ -183,8 +185,8 @@ impl Structure {
         }
     }
 
-    /// 内容摘要：尺寸 + 每个非空格子的坐标与规范写法（按坐标排序）。
-    /// 两个文件摘要相同就是同一个结构，与文件里调色板的顺序、压缩方式无关。
+    /// Content digest: the size plus the position and canonical spelling of every non-empty cell (sorted by position).
+    /// Two files with the same digest hold the same structure, regardless of palette order or compression.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha256::new();
@@ -197,7 +199,7 @@ impl Structure {
         h.finalize().into()
     }
 
-    /// 材料表：方块 id → 数量（只数主方块），按数量降序、同数按 id。
+    /// Material list: block id → count (main blocks only), by count descending, then by id.
     #[must_use]
     pub fn materials(&self) -> Vec<(String, u32)> {
         let mut m: HashMap<&str, u32> = HashMap::new();
@@ -211,7 +213,7 @@ impl Structure {
         v
     }
 
-    /// 和另一态比较（同一版本的开、关两态）。只比方块，不比实体。
+    /// Compares with the other state (the open and closed states of the same build). Compares blocks only, not entities.
     #[must_use]
     pub fn diff(&self, other: &Self) -> FormDiff {
         let left: HashMap<[u32; 3], String> = self.blocks.iter().map(|b| (b.pos, self.cell_key(b))).collect();
@@ -233,7 +235,7 @@ impl Structure {
         FormDiff { moving, total }
     }
 
-    /// 方块的规范写法列表（坐标 + 写法），给需要逐格比较的调用方。
+    /// Canonical spelling of each block (position + spelling), for callers that compare cell by cell.
     pub fn cells(&self) -> impl Iterator<Item = ([u32; 3], String)> + '_ {
         self.blocks.iter().map(|b| (b.pos, self.cell_key(b)))
     }

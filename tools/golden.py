@@ -1,4 +1,5 @@
-"""用参考读取器算黄金样本：Rust 测试断言与它一致。规范化规则与 mc-structure 的 Structure::digest 相同。"""
+"""Computes golden values with the reference reader; the Rust tests assert the same values. Normalization follows
+mc-structure's Structure::digest."""
 import hashlib, json, sys
 import nbt_le
 EMPTY={'minecraft:air','minecraft:cave_air','minecraft:void_air','minecraft:structure_void'}

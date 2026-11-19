@@ -1,7 +1,8 @@
-//! 真实样本的黄金测试。期望值由独立的 Python 参考实现算出（`tools/golden.py`，与本库不共享代码）。
+//! Golden tests on real samples. Expected values come from an independent Python reference implementation (`tools/golden.py`,
+//! which shares no code with this crate).
 
-// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
-// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+// clippy.toml's allow-*-in-tests covers `#[test]` functions and `#[cfg(test)]` modules only; helper functions in integration
+// test files (load, bytes_of, gzip, …) are not "in tests" for clippy 1.94. Test code should panic on failure, so the whole file opts out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use mc_structure::{Edition, Limits, parse};
@@ -38,7 +39,8 @@ fn bedrock_format_version_1_two_layers() {
     assert_eq!(s.block_entities.len(), 188);
 }
 
-/// 方块实体里记着导出时的世界坐标：原点 + 结构内坐标必须等于它。这同时验证了线性下标的展开顺序。
+/// Block entities record their world position at export: origin + position in the structure must equal it. This also checks the
+/// order in which the linear index unfolds.
 #[test]
 fn bedrock_block_entity_world_coords_match_origin_plus_pos() {
     for name in ["bedrock_v1_close.mcstructure", "bedrock_v2_close.mcstructure"] {
@@ -53,7 +55,7 @@ fn bedrock_block_entity_world_coords_match_origin_plus_pos() {
                 checked += 1;
             }
         }
-        assert!(checked > 100, "{name} 只核对了 {checked} 个");
+        assert!(checked > 100, "{name}: only {checked} checked");
     }
 }
 
@@ -96,5 +98,5 @@ fn truncated_real_file_fails_with_position() {
     let bytes = std::fs::read(path).unwrap();
     let e = parse(&bytes[..bytes.len() / 2], Some("x.mcstructure"), &Limits::default()).unwrap_err();
     let msg = e.to_string();
-    assert!(msg.contains("偏移"), "{msg}");
+    assert!(msg.contains("offset"), "{msg}");
 }

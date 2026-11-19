@@ -1,8 +1,9 @@
-//! 评审 M1：内存放大。一个 gzip 后只有几 KB 的文件，解压出来是一个 400 万元素的字节列表——线上每个元素 1 字节，
-//! 在内存里是一个 32 字节的标签。以前按元素个数记账，这样的文件能占到约 128 MB；现在按字节记，分配之前就拒绝。
+//! Memory amplification. A file of a few KB after gzip can decompress to a byte list of four million elements: one byte each in
+//! the file, but a 32-byte tag each in memory. Counting elements alone would let such a file take about 128 MB; counting bytes
+//! rejects it before allocating.
 
-// clippy.toml 的 allow-*-in-tests 只管 `#[test]` 函数和 `#[cfg(test)]` 模块；集成测试文件里的辅助函数（load、bytes_of、gzip……）
-// 在 clippy 1.94 里不算「测试里」，会被 unwrap_used 等拦下。测试代码本来就该在出错时直接 panic，这里整个文件放行。
+// clippy.toml's allow-*-in-tests covers `#[test]` functions and `#[cfg(test)]` modules only; helper functions in integration
+// test files (load, bytes_of, gzip, …) are not "in tests" for clippy 1.94. Test code should panic on failure, so the whole file opts out.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use std::io::Write;
@@ -20,10 +21,10 @@ fn tiny_gzip_with_a_huge_byte_list_is_rejected_before_allocation() {
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     gz.write_all(&raw).unwrap();
     let file = gz.finish().unwrap();
-    assert!(file.len() < 8 * 1024, "压缩后只有 {} 字节", file.len());
+    assert!(file.len() < 8 * 1024, "only {} bytes compressed", file.len());
     match parse_java(&file, &Limits::default()) {
         Err(Error::Nbt(e)) => assert!(matches!(e.kind, NbtErrorKind::TooMuchMemory(_)), "{e}"),
-        other => panic!("应该在分配之前就拒绝：{other:?}"),
+        other => panic!("should be rejected before allocating: {other:?}"),
     }
 }
 
@@ -33,7 +34,7 @@ fn gzip(raw: &[u8]) -> Vec<u8> {
     gz.finish().unwrap()
 }
 
-/// 根复合标签里放一个 n 个元素的字节列表：线上每个元素 1 字节，内存里是一个标签
+/// A root compound holding a byte list of n elements: one byte each in the file, one tag each in memory
 fn byte_list(n: i32) -> Vec<u8> {
     let mut raw = vec![10, 0, 0, 9, 0, 1, b'l', 1];
     raw.extend_from_slice(&n.to_be_bytes());
@@ -47,16 +48,18 @@ fn java_files_get_a_smaller_memory_budget_than_legacy_bedrock() {
     assert!(Limits::java().max_memory < Limits::default().max_memory);
     assert_eq!(Limits::for_edition(Edition::Java), Limits::java());
     assert_eq!(Limits::for_edition(Edition::Bedrock), Limits::default());
-    // 复审里的那个文件：3.5 KB 的 gzip，360 万个元素，在默认预算下能占到约 116 MiB；按 Java 的预算，分配之前就拒绝
+    // 3.5 KB of gzip holding 3.6 million elements: about 116 MiB under the default budget, rejected before allocating under the
+    // Java budget
     let file = gzip(&byte_list(3_600_000));
-    assert!(file.len() < 8 * 1024, "压缩后只有 {} 字节", file.len());
+    assert!(file.len() < 8 * 1024, "only {} bytes compressed", file.len());
     match parse_java(&file, &Limits::java()) {
         Err(Error::Nbt(e)) => assert!(matches!(e.kind, NbtErrorKind::TooMuchMemory(m) if m == Limits::JAVA_MAX_MEMORY), "{e}"),
-        other => panic!("Java 的预算应该在分配之前就拒绝：{other:?}"),
+        other => panic!("the Java budget should reject this before allocating: {other:?}"),
     }
 }
 
-/// 原版结构 .nbt：满 48×48×48（结构方块能存的最大体积）每格一个方块，要能在 Java 的预算里解析
+/// A vanilla .nbt structure filling 48×48×48 (the largest volume a structure block can save) with one block per cell must parse
+/// within the Java budget
 #[test]
 fn a_full_vanilla_structure_fits_the_java_budget() {
     fn name(raw: &mut Vec<u8>, s: &str) {
@@ -73,7 +76,7 @@ fn a_full_vanilla_structure_fits_the_java_budget() {
     for _ in 0..3 {
         raw.extend_from_slice(&n.to_be_bytes());
     }
-    // palette: 两种方块
+    // palette: two kinds of block
     raw.push(9);
     name(&mut raw, "palette");
     raw.push(10);
@@ -84,7 +87,7 @@ fn a_full_vanilla_structure_fits_the_java_budget() {
         name(&mut raw, b);
         raw.push(0);
     }
-    // blocks: 每格一个 {pos: [x, y, z], state}
+    // blocks: one {pos: [x, y, z], state} per cell
     raw.push(9);
     name(&mut raw, "blocks");
     raw.push(10);
@@ -110,9 +113,9 @@ fn a_full_vanilla_structure_fits_the_java_budget() {
     name(&mut raw, "DataVersion");
     raw.extend_from_slice(&3953_i32.to_be_bytes());
     raw.push(0);
-    let s = parse_java(&gzip(&raw), &Limits::java()).unwrap_or_else(|e| panic!("满 48³ 的原版结构应该在 Java 的预算里：{e}"));
+    let s = parse_java(&gzip(&raw), &Limits::java()).unwrap_or_else(|e| panic!("a full 48³ vanilla structure should fit the Java budget: {e}"));
     assert_eq!(s.size, [48, 48, 48]);
-    // 预算收到四分之一就放不下：这个数和真实文件是一个量级，不是随手给的大数
+    // With a quarter of the budget it no longer fits: the budget is sized to real files, not an arbitrary large number
     let half = Limits { max_memory: Limits::JAVA_MAX_MEMORY / 4, ..Limits::java() };
-    assert!(parse_java(&gzip(&raw), &half).is_err(), "预算的量级要和真实文件对得上");
+    assert!(parse_java(&gzip(&raw), &half).is_err(), "the budget should be sized to real files");
 }

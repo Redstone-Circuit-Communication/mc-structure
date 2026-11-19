@@ -2,11 +2,11 @@
 name = "mc-structure"
 version = "0.1.0"
 edition = "2024"
-# 最低 1.91.1，推荐 1.94
+# Minimum 1.91.1; 1.94 recommended
 rust-version = "1.91.1"
 license = "MIT"
-description = "Minecraft 结构文件解析：基岩版 .mcstructure、Java 版结构 .nbt 与 Litematica 投影 .litematic → 统一的结构模型（调色板 + 方块），带资源上限与可定位的错误"
-repository = "https://github.com/your-org/mc-structure"
+description = "Parser for Minecraft structure files (Bedrock .mcstructure, Java structure .nbt, Litematica .litematic) into one model: palette plus blocks, with resource limits and errors that point at the offending byte"
+repository = "https://github.com/Redstone-Circuit-Communication/mc-structure"
 keywords = ["minecraft", "nbt", "mcstructure", "litematic", "structure"]
 categories = ["parser-implementations", "game-development"]
 readme = "README.md"
@@ -24,7 +24,7 @@ indexing_slicing = "warn"
 panic = "warn"
 
 [dependencies]
-# Java 的 NBT 字符串是「修改版 UTF-8」，交给现成的库编解码
+# Java NBT strings are "modified UTF-8"; an existing crate handles the encoding
 cesu8 = "1"
 flate2 = "1"
 sha2 = "0.11"

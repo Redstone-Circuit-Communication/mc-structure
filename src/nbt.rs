@@ -1,24 +1,27 @@
-//! NBT 读写：一个读取器，用字节序参数区分 Java（大端、修改版 UTF-8）与基岩（小端、UTF-8）。
+//! NBT reading and writing. One reader serves both editions; the byte order selects Java (big-endian, modified UTF-8) or
+//! Bedrock (little-endian, UTF-8).
 //!
-//! 安全上限只在这里有一份：嵌套深度、元素预算（**数组与列表按长度计入**——否则一个声明了几千万元素的
-//! IntArray 只占几个字节，再大的结构也碰不到上限）、**内存预算**（按解析出来的标签在内存里的字节数记，分配之前核对）、
-//! 分配前对照剩余字节。解析路径上不 panic。
-//! 错误带字节偏移与路径，路径只在出错回溯时拼出来，正常路径不多分配。
+//! All safety limits live here: nesting depth; an element budget (**arrays and lists count their length**, otherwise an
+//! IntArray declaring tens of millions of elements would take a few bytes and never reach the limit); a **memory budget**
+//! (the bytes the parsed tags take in memory, checked before allocating);
+//! and every length is checked against the remaining input before allocating. Nothing on the parse path panics.
+//! Errors carry the byte offset and the tag path; the path is assembled only while unwinding an error, so the success path does
+//! not allocate for it.
 
 use std::fmt;
 
 use crate::Limits;
 
-/// 字节序（也决定字符串编码）。
+/// Byte order (which also decides the string encoding).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Endian {
-    /// Java 版：大端，字符串为修改版 UTF-8
+    /// Java Edition: big-endian, strings in modified UTF-8
     Big,
-    /// 基岩版：小端，字符串为 UTF-8
+    /// Bedrock Edition: little-endian, strings in UTF-8
     Little,
 }
 
-/// 一个 NBT 值。
+/// An NBT value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag {
     /// TAG_Byte
@@ -37,7 +40,7 @@ pub enum Tag {
     ByteArray(Vec<i8>),
     /// TAG_String
     String(String),
-    /// TAG_List（元素类型相同）
+    /// TAG_List (all elements of the same type)
     List(Vec<Tag>),
     /// TAG_Compound
     Compound(Compound),
@@ -47,29 +50,29 @@ pub enum Tag {
     LongArray(Vec<i64>),
 }
 
-/// 复合标签：保持文件里的顺序。
+/// A compound tag, keeping the order of the file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Compound(pub Vec<(String, Tag)>);
 
 impl Compound {
-    /// 按键取值（复合标签一般很小，线性查找即可）。
+    /// Looks up a key (compounds are usually small, so a linear scan is enough).
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Tag> {
         self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
-    /// 遍历键值对。
+    /// Iterates over the key-value pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Tag)> {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
-    /// 键的个数。
+    /// Number of keys.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
-    /// 是否为空。
+    /// Whether the compound is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -77,7 +80,7 @@ impl Compound {
 }
 
 impl Tag {
-    /// 标签类型号。
+    /// Tag type id.
     #[must_use]
     pub const fn id(&self) -> u8 {
         match self {
@@ -96,7 +99,7 @@ impl Tag {
         }
     }
 
-    /// Byte、Short、Int 都当整数读。
+    /// Reads Byte, Short and Int as an integer.
     #[must_use]
     pub fn as_i32(&self) -> Option<i32> {
         match self {
@@ -107,7 +110,7 @@ impl Tag {
         }
     }
 
-    /// 字符串。
+    /// The string value.
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -116,7 +119,7 @@ impl Tag {
         }
     }
 
-    /// 复合标签。
+    /// The compound value.
     #[must_use]
     pub fn as_compound(&self) -> Option<&Compound> {
         match self {
@@ -125,7 +128,7 @@ impl Tag {
         }
     }
 
-    /// 列表。
+    /// The list value.
     #[must_use]
     pub fn as_list(&self) -> Option<&[Tag]> {
         match self {
@@ -134,7 +137,8 @@ impl Tag {
         }
     }
 
-    /// 整数序列：`List<Int/Short/Byte>` 或 `IntArray` 都接受（基岩 `format_version` 1 与 2 的 `block_indices` 就分别是这两种）。
+    /// A sequence of integers: accepts `List<Int/Short/Byte>` as well as `IntArray` (Bedrock's `block_indices` uses the former
+    /// in `format_version` 1 and the latter in 2).
     #[must_use]
     pub fn as_ints(&self) -> Option<Vec<i32>> {
         match self {
@@ -144,7 +148,7 @@ impl Tag {
         }
     }
 
-    /// 类型名（错误信息用）。
+    /// Type name, for error messages.
     #[must_use]
     pub const fn type_name(&self) -> &'static str {
         match self {
@@ -164,49 +168,50 @@ impl Tag {
     }
 }
 
-/// 出错的原因。
+/// What went wrong.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NbtErrorKind {
-    /// 数据提前结束
-    #[error("数据提前结束")]
+    /// The data ended early
+    #[error("unexpected end of data")]
     Truncated,
-    /// 不认识的标签类型号
-    #[error("未知的标签类型 {0}")]
+    /// An unknown tag type id
+    #[error("unknown tag type {0}")]
     UnknownTag(u8),
-    /// 根标签不是复合标签（多半不是 NBT 文件，或字节序选错了）
-    #[error("根标签不是复合标签")]
+    /// The root tag is not a compound (most likely not an NBT file, or the wrong byte order)
+    #[error("root tag is not a compound")]
     RootNotCompound,
-    /// 嵌套太深
-    #[error("嵌套超过 {0} 层")]
+    /// Nested too deeply
+    #[error("nesting deeper than {0} levels")]
     TooDeep(u32),
-    /// 元素太多
-    #[error("元素超过 {0} 个")]
+    /// Too many elements
+    #[error("more than {0} elements")]
     TooManyElements(u64),
-    /// 解析出来的标签要占的内存超过上限（按字节记：线上 1 字节的列表元素在内存里是 32 字节的标签）
-    #[error("解析出来要占的内存超过 {0} 字节")]
+    /// The parsed tags would take more memory than allowed (counted in bytes: a list element of 1 byte in the file is a
+    /// 32-byte tag in memory)
+    #[error("parsed data would take more than {0} bytes of memory")]
     TooMuchMemory(u64),
-    /// 声明的长度为负数
-    #[error("长度为负数")]
+    /// A declared length is negative
+    #[error("negative length")]
     NegativeLength,
-    /// 声明的长度比剩下的字节还多
-    #[error("声明的长度 {0} 超过剩余数据")]
+    /// A declared length is larger than the remaining input
+    #[error("declared length {0} exceeds the remaining data")]
     LengthExceedsInput(u64),
-    /// 字符串编码不对
-    #[error("字符串编码不对")]
+    /// A string is not validly encoded
+    #[error("invalid string encoding")]
     BadString,
-    /// 非空列表的元素类型是 End
-    #[error("非空列表的元素类型是 End")]
+    /// A non-empty list has element type End
+    #[error("non-empty list with element type End")]
     ListOfEnd,
 }
 
-/// NBT 错误：原因 + 字节偏移 + 路径。
+/// An NBT error: what went wrong, the byte offset and the tag path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NbtError {
-    /// 出错时读到的位置
+    /// Read position at the time of the error
     pub offset: usize,
-    /// 原因
+    /// What went wrong
     pub kind: NbtErrorKind,
-    /// 路径段，最内层在前（`path()` 拼成 `a.b[3].c`）
+    /// Path segments, innermost first (`path()` joins them into `a.b[3].c`)
     segments: Vec<Seg>,
 }
 
@@ -226,7 +231,7 @@ impl NbtError {
         self
     }
 
-    /// 路径，如 `structure.block_indices[0]`；根上出错是空串。
+    /// The tag path, such as `structure.block_indices[0]`; empty for an error at the root.
     #[must_use]
     pub fn path(&self) -> String {
         let mut out = String::new();
@@ -248,8 +253,8 @@ impl NbtError {
 impl fmt::Display for NbtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let p = self.path();
-        let p = if p.is_empty() { "<根>" } else { p.as_str() };
-        write!(f, "{p} @ 偏移 {}：{}", self.offset, self.kind)
+        let p = if p.is_empty() { "<root>" } else { p.as_str() };
+        write!(f, "{p} at offset {}: {}", self.offset, self.kind)
     }
 }
 
@@ -261,15 +266,15 @@ struct Reader<'a> {
     endian: Endian,
     limits: Limits,
     elements: u64,
-    /// 已经记下的内存（字节，估算）
+    /// Memory accounted so far (bytes, estimated)
     memory: u64,
 }
 
 type R<T> = Result<T, NbtError>;
 
-/// 一个标签本身在内存里占的字节（列表的每个元素都是一个）
+/// Bytes one tag takes in memory (every list element is one)
 const TAG_BYTES: u64 = std::mem::size_of::<Tag>() as u64;
-/// 复合标签里的一项（键加值）本身占的字节；键的字符串内容另算
+/// Bytes one compound entry (key plus value) takes in memory; the key's characters are counted separately
 const ENTRY_BYTES: u64 = std::mem::size_of::<(String, Tag)>() as u64;
 
 impl<'a> Reader<'a> {
@@ -321,7 +326,7 @@ impl Reader<'_> {
     num!(f32, f32, 4);
     num!(f64, f64, 8);
 
-    /// 元素预算：每个标签算 1，数组与列表按长度算。
+    /// Element budget: each tag counts 1, arrays and lists count their length.
     fn bump(&mut self, n: u64) -> R<()> {
         self.elements = self.elements.saturating_add(n);
         if self.elements > self.limits.max_elements {
@@ -330,8 +335,9 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// 内存预算：解析出来的标签在内存里大约占多少字节，在**分配之前**记上。按字节记，不按个数
-    /// （线上 1 字节的列表元素在内存里是一个 32 字节的 `Tag`；只按个数记，gzip 过的几 KB 文件能变成上百 MB）。
+    /// Memory budget: roughly how many bytes the parsed tags take in memory, recorded **before** allocating. Counted in bytes,
+    /// not in elements: a list element of 1 byte in the file is a 32-byte `Tag` in memory, so counting elements alone would let a
+    /// few KB of gzip grow to hundreds of MB.
     fn charge(&mut self, bytes: u64) -> R<()> {
         self.memory = self.memory.saturating_add(bytes);
         if self.memory > self.limits.max_memory {
@@ -340,8 +346,9 @@ impl Reader<'_> {
         Ok(())
     }
 
-    /// 读一个长度并核对：非负、不超过剩余字节能装下的个数。`budget` 为真时把长度计入元素预算
-    /// （数组要；列表不要——列表的每个元素读的时候各自算 1，以前在这里再算一遍，等于记了两次）。
+    /// Reads a length and checks it: non-negative, and no more elements than the remaining bytes can hold. When `budget` is
+    /// true the length is charged to the element budget
+    /// (for arrays; not for lists, whose elements each count 1 as they are read, so charging here would count them twice).
     fn len(&mut self, elem_size: usize, budget: bool) -> R<usize> {
         let n = self.i32()?;
         let n = usize::try_from(n).map_err(|_| self.err(NbtErrorKind::NegativeLength))?;
@@ -416,7 +423,7 @@ impl Reader<'_> {
     fn list(&mut self, depth: u32) -> R<Tag> {
         let depth = self.deeper(depth)?;
         let elem = self.u8()?;
-        // 每个元素至少占的字节数：用来在分配前核对声明的长度
+        // Minimum bytes per element, used to check the declared length before allocating
         let min = match elem {
             0 => 0,
             1 => 1,
@@ -432,7 +439,7 @@ impl Reader<'_> {
         if elem == 0 && n > 0 {
             return Err(self.err(NbtErrorKind::ListOfEnd));
         }
-        // 先记内存再分配：每个元素都是一个完整的 Tag
+        // Account for the memory before allocating: every element is a full Tag
         self.charge(n as u64 * TAG_BYTES)?;
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
@@ -459,7 +466,8 @@ impl Reader<'_> {
     }
 }
 
-/// 读一个以复合标签为根的 NBT 文档，返回根名与根复合标签。根之后多余的字节忽略。
+/// Reads an NBT document whose root is a compound, returning the root name and the root compound. Trailing bytes after the
+/// root are ignored.
 pub fn read(buf: &[u8], endian: Endian, limits: &Limits) -> Result<(String, Compound), NbtError> {
     let mut r = Reader { buf, pos: 0, endian, limits: *limits, elements: 0, memory: 0 };
     if r.u8()? != 10 {
@@ -470,7 +478,8 @@ pub fn read(buf: &[u8], endian: Endian, limits: &Limits) -> Result<(String, Comp
     Ok((name, root))
 }
 
-/// 写一个以复合标签为根的 NBT 文档（测试夹具与工具用）。列表按第一个元素的类型写。
+/// Writes an NBT document whose root is a compound (used for test fixtures and tools). A list is written with the type of its
+/// first element.
 #[must_use]
 pub fn write(name: &str, root: &Compound, endian: Endian) -> Vec<u8> {
     let mut w = Writer { out: Vec::new(), endian };
@@ -588,10 +597,10 @@ mod tests {
 
     #[test]
     fn java_strings_are_modified_utf8() {
-        // 修改版 UTF-8：U+0000 编成 C0 80，增补平面字符编成代理对（6 字节）
+        // Modified UTF-8: U+0000 becomes C0 80, and characters outside the BMP become surrogate pairs (6 bytes)
         let bytes = write("", &Compound(vec![("s".into(), Tag::String("\u{0}🙂".into()))]), Endian::Big);
         assert!(bytes.windows(2).any(|w| w == [0xc0, 0x80]));
-        assert!(!bytes.contains(&0xf0), "不应出现 4 字节 UTF-8");
+        assert!(!bytes.contains(&0xf0), "4-byte UTF-8 sequences must not appear");
     }
 
     #[test]
@@ -599,15 +608,16 @@ mod tests {
         let bytes = write("", &sample(), Endian::Little);
         let cut = &bytes[..bytes.len() - 10];
         let e = read(cut, Endian::Little, &Limits::default()).unwrap_err();
-        // 截在最后一个 LongArray 中间：声明的长度超过剩下的字节，分配之前就拒绝（LengthExceedsInput）；
-        // 截在定长字段中间则是 Truncated。两种都如实说明「输入不完整」，关键是带上偏移与路径。
+        // Cut in the middle of the last LongArray: the declared length exceeds the remaining bytes and is rejected before
+        // allocating (LengthExceedsInput); a cut inside a fixed-size field is Truncated instead. Both report incomplete input;
+        // what matters is that they carry the offset and the path.
         assert!(matches!(e.kind, NbtErrorKind::Truncated | NbtErrorKind::LengthExceedsInput(_)), "{:?}", e.kind);
-        assert!(e.path().starts_with("la"), "路径应指向最后一个字段：{}", e.path());
+        assert!(e.path().starts_with("la"), "the path should point at the last field: {}", e.path());
     }
 
     #[test]
     fn array_length_counts_against_budget() {
-        // 一个声明了 1000 个元素的 IntArray：预算 100 时在分配之前就拒绝
+        // An IntArray declaring 1000 elements: with a budget of 100 it is rejected before allocating
         let mut bytes = vec![10, 0, 0, 11, 1, 0, b'a'];
         bytes.extend_from_slice(&1000i32.to_le_bytes());
         bytes.extend(std::iter::repeat_n(0u8, 4000));
@@ -617,7 +627,7 @@ mod tests {
         assert_eq!(e.kind, NbtErrorKind::TooManyElements(100));
     }
 
-    /// 只含一个字节列表的 NBT：线上每个元素 1 字节
+    /// NBT holding a single byte list: each element takes 1 byte in the file
     fn byte_list(n: i32) -> Vec<u8> {
         let mut bytes = vec![10, 0, 0, 9, 0, 1, b'l', 1];
         bytes.extend_from_slice(&n.to_be_bytes());
@@ -628,11 +638,12 @@ mod tests {
 
     #[test]
     fn memory_is_charged_in_bytes_before_allocation() {
-        // 评审 M1：线上 1 字节的列表元素在内存里是一个 32 字节的标签。400 万个要约 122 MiB，超过默认的 112 MiB，
-        // 分配之前就拒绝（以前按个数记，这样的文件能占到约 128 MB）
+        // A list element of 1 byte in the file is a 32-byte tag in memory. Four million of them need about 122 MiB, more than
+        // the default 112 MiB, so they are rejected before allocating (counting elements alone would have let such a file take
+        // about 128 MB)
         let e = read(&byte_list(4_000_000), Endian::Big, &Limits::default()).unwrap_err();
         assert_eq!(e.kind, NbtErrorKind::TooMuchMemory(Limits::default().max_memory));
-        // 小的照常读；预算调小了同样的东西也会被拒
+        // A small one reads normally; with a smaller budget the same data is rejected too
         let (_, root) = read(&byte_list(1000), Endian::Big, &Limits::default()).unwrap();
         assert_eq!(root.get("l").and_then(Tag::as_list).map(<[Tag]>::len), Some(1000));
         let tight = Limits { max_memory: 10_000, ..Limits::default() };
@@ -641,9 +652,9 @@ mod tests {
 
     #[test]
     fn list_elements_count_once_against_the_element_budget() {
-        // 以前列表的长度先算一遍、每个元素读的时候又算一遍：实际上限只有一半
+        // The list length must not be charged on top of the elements themselves, or the effective limit would be halved
         let limits = Limits { max_elements: 1000 + 1, ..Limits::default() };
-        assert!(read(&byte_list(1000), Endian::Big, &limits).is_ok(), "1000 个元素加上列表本身，正好 1001");
+        assert!(read(&byte_list(1000), Endian::Big, &limits).is_ok(), "1000 elements plus the list itself is exactly 1001");
         let limits = Limits { max_elements: 1000, ..Limits::default() };
         assert!(matches!(read(&byte_list(1000), Endian::Big, &limits).unwrap_err().kind, NbtErrorKind::TooManyElements(1000)));
     }
@@ -659,7 +670,7 @@ mod tests {
 
     #[test]
     fn depth_bomb_is_rejected() {
-        // 100 层嵌套的列表
+        // Lists nested 100 levels deep
         let mut bytes = vec![10, 0, 0, 9, 1, 0, b'x'];
         for _ in 0..100 {
             bytes.push(9);
@@ -679,7 +690,8 @@ mod tests {
         assert_eq!(read(&[8, 0, 0], Endian::Little, &Limits::default()).unwrap_err().kind, NbtErrorKind::RootNotCompound);
     }
 
-    /// 随机字节：只要不 panic、不挂住（确定性的伪随机，模糊测试的轻量替身；完整的 cargo-fuzz 目标见 README）
+    /// Random bytes must neither panic nor hang (deterministic pseudo-random input, a lightweight stand-in for fuzzing; see the
+    /// README for the cargo-fuzz target).
     #[test]
     fn random_bytes_never_panic() {
         let mut s: u64 = 0x2545_f491_4f6c_dd1d;

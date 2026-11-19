@@ -1,44 +1,44 @@
-//! 基岩版 `.mcstructure`：未压缩的小端 NBT。
+//! Bedrock `.mcstructure`: uncompressed little-endian NBT.
 //!
 //! ```text
-//! format_version: Int                       1 或 2（实测两种都有）
+//! format_version: Int                       1 or 2 (both occur in practice)
 //! size: List<Int>[3]
-//! structure_world_origin: List<Int>[3]      导出时的世界坐标
+//! structure_world_origin: List<Int>[3]      world position at the time of export
 //! structure:
-//!   block_indices: List<…>[1 或 2]          每层一个整数序列，长度 = x·y·z；-1 表示这一格没有方块
-//!                                           format_version 1 是 List<Int>，2 是 IntArray（实测）
-//!                                           第 0 层是主方块，第 1 层是含水层
+//!   block_indices: List<…>[1 or 2]          one integer sequence per layer, length = x·y·z; -1 means an empty cell
+//!                                           a List<Int> in format_version 1, an IntArray in 2 (observed)
+//!                                           layer 0 holds the main blocks, layer 1 the waterlogging layer
 //!   entities: List<Compound>
 //!   palette.default:
 //!     block_palette: List<{name, states, version}>
-//!     block_position_data: { "<线性下标>": { block_entity_data: {…} } }
+//!     block_position_data: { "<linear index>": { block_entity_data: {…} } }
 //! ```
 //!
-//! 线性下标展开：z 最快、然后 y、然后 x —— `i = x·(sy·sz) + y·sz + z`。
-//! （验证：夹具里 `"167"` 号格子的方块实体记着世界坐标 (-12,115,193)，结构原点是 (-12,104,180)，
-//! 167 按此展开正好是 (0,11,13)。）
+//! Linear index layout: z varies fastest, then y, then x: `i = x·(sy·sz) + y·sz + z`.
+//! (Check: in the fixture, the block entity of cell `"167"` records the world position (-12,115,193) and the structure origin
+//! is (-12,104,180); 167 unfolds to exactly (0,11,13).)
 
 use crate::nbt::{self, Compound, Endian, Tag};
 use crate::{Block, BlockEntity, BlockState, Edition, Error, Format, Limits, StateValue, Structure};
 
 fn ints3(c: &Compound, key: &str) -> Result<Option<[i32; 3]>, Error> {
     let Some(t) = c.get(key) else { return Ok(None) };
-    let v = t.as_ints().ok_or_else(|| Error::invalid(key, format!("应该是三个整数，实际是 {}", t.type_name())))?;
-    <[i32; 3]>::try_from(v.as_slice()).map(Some).map_err(|_| Error::invalid(key, format!("应该是三个整数，实际有 {} 个", v.len())))
+    let v = t.as_ints().ok_or_else(|| Error::invalid(key, format!("expected three integers, found {}", t.type_name())))?;
+    <[i32; 3]>::try_from(v.as_slice()).map(Some).map_err(|_| Error::invalid(key, format!("expected three integers, found {}", v.len())))
 }
 
 pub(crate) fn size_of(c: &Compound, key: &str, limits: &Limits) -> Result<[u32; 3], Error> {
-    let s = ints3(c, key)?.ok_or_else(|| Error::invalid(key, "缺少"))?;
+    let s = ints3(c, key)?.ok_or_else(|| Error::invalid(key, "missing"))?;
     let mut out = [0u32; 3];
     for (o, v) in out.iter_mut().zip(s) {
         *o = u32::try_from(v)
             .ok()
             .filter(|v| (1..=limits.max_axis).contains(v))
-            .ok_or_else(|| Error::TooLarge(format!("结构尺寸 {}×{}×{} 不在 1..={} 之内", s[0], s[1], s[2], limits.max_axis)))?;
+            .ok_or_else(|| Error::TooLarge(format!("structure size {}×{}×{} is outside 1..={}", s[0], s[1], s[2], limits.max_axis)))?;
     }
     let volume = u64::from(out[0]) * u64::from(out[1]) * u64::from(out[2]);
     if volume > limits.max_elements {
-        return Err(Error::TooLarge(format!("结构体积 {volume} 超过上限 {}", limits.max_elements)));
+        return Err(Error::TooLarge(format!("structure volume {volume} exceeds the limit of {}", limits.max_elements)));
     }
     Ok(out)
 }
@@ -49,7 +49,7 @@ fn state_value(path: &str, t: &Tag) -> Result<StateValue, Error> {
         Tag::Short(v) => Ok(StateValue::Int(i32::from(*v))),
         Tag::Int(v) => Ok(StateValue::Int(*v)),
         Tag::String(s) => Ok(StateValue::String(s.clone())),
-        other => Err(Error::invalid(path, format!("方块状态的值不支持 {} 类型", other.type_name()))),
+        other => Err(Error::invalid(path, format!("unsupported block state value of type {}", other.type_name()))),
     }
 }
 
@@ -62,12 +62,12 @@ fn palette(st: &Compound) -> Result<Vec<BlockState>, Error> {
         .and_then(Tag::as_compound)
         .and_then(|d| d.get("block_palette"))
         .and_then(Tag::as_list)
-        .ok_or_else(|| Error::invalid(P, "缺少调色板"))?;
+        .ok_or_else(|| Error::invalid(P, "missing palette"))?;
     let mut out = Vec::with_capacity(list.len());
     for (i, e) in list.iter().enumerate() {
         let path = format!("{P}[{i}]");
-        let e = e.as_compound().ok_or_else(|| Error::invalid(&path, "不是复合标签"))?;
-        let name = e.get("name").and_then(Tag::as_str).ok_or_else(|| Error::invalid(&path, "缺少 name"))?;
+        let e = e.as_compound().ok_or_else(|| Error::invalid(&path, "not a compound tag"))?;
+        let name = e.get("name").and_then(Tag::as_str).ok_or_else(|| Error::invalid(&path, "missing name"))?;
         let mut states = Vec::new();
         if let Some(s) = e.get("states").and_then(Tag::as_compound) {
             for (k, v) in s.iter() {
@@ -81,24 +81,24 @@ fn palette(st: &Compound) -> Result<Vec<BlockState>, Error> {
 
 pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
     let (_, root) = nbt::read(bytes, Endian::Little, limits)?;
-    let format_version = root.get("format_version").and_then(Tag::as_i32).ok_or_else(|| Error::invalid("format_version", "缺少或不是整数"))?;
+    let format_version = root.get("format_version").and_then(Tag::as_i32).ok_or_else(|| Error::invalid("format_version", "missing or not an integer"))?;
     let size = size_of(&root, "size", limits)?;
     let origin = ints3(&root, "structure_world_origin")?;
-    let st = root.get("structure").and_then(Tag::as_compound).ok_or_else(|| Error::invalid("structure", "缺少"))?;
+    let st = root.get("structure").and_then(Tag::as_compound).ok_or_else(|| Error::invalid("structure", "missing"))?;
     let palette = palette(st)?;
 
     let [sx, sy, sz] = size;
     let volume = (sx as usize) * (sy as usize) * (sz as usize);
-    let layers_tag = st.get("block_indices").and_then(Tag::as_list).ok_or_else(|| Error::invalid("structure.block_indices", "缺少"))?;
+    let layers_tag = st.get("block_indices").and_then(Tag::as_list).ok_or_else(|| Error::invalid("structure.block_indices", "missing"))?;
     if layers_tag.is_empty() || layers_tag.len() > 2 {
-        return Err(Error::invalid("structure.block_indices", format!("应该有 1 或 2 层，实际 {} 层", layers_tag.len())));
+        return Err(Error::invalid("structure.block_indices", format!("expected 1 or 2 layers, found {}", layers_tag.len())));
     }
     let mut layers = Vec::with_capacity(layers_tag.len());
     for (i, l) in layers_tag.iter().enumerate() {
         let path = format!("structure.block_indices[{i}]");
-        let v = l.as_ints().ok_or_else(|| Error::invalid(&path, format!("应该是整数序列，实际是 {}", l.type_name())))?;
+        let v = l.as_ints().ok_or_else(|| Error::invalid(&path, format!("expected a sequence of integers, found {}", l.type_name())))?;
         if v.len() != volume {
-            return Err(Error::invalid(&path, format!("长度 {} 与体积 {volume} 不符", v.len())));
+            return Err(Error::invalid(&path, format!("length {} does not match the volume {volume}", v.len())));
         }
         layers.push(v);
     }
@@ -108,7 +108,7 @@ pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
         }
         let i = usize::try_from(idx).unwrap_or(usize::MAX);
         match palette.get(i) {
-            None => Err(Error::invalid(path, format!("调色板下标 {idx} 越界（调色板只有 {} 项）", palette.len()))),
+            None => Err(Error::invalid(path, format!("palette index {idx} out of range (the palette has {} entries)", palette.len()))),
             Some(s) if s.is_empty() => Ok(None),
             Some(_) => Ok(Some(idx.unsigned_abs())),
         }
@@ -137,9 +137,9 @@ pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
     {
         for (k, v) in bpd.iter() {
             let path = format!("structure.palette.default.block_position_data.{k}");
-            let i: usize = k.parse().map_err(|_| Error::invalid(&path, "键应该是线性下标"))?;
+            let i: usize = k.parse().map_err(|_| Error::invalid(&path, "key should be a linear index"))?;
             if i >= volume {
-                return Err(Error::invalid(&path, format!("下标越界（体积 {volume}）")));
+                return Err(Error::invalid(&path, format!("index out of range (volume {volume})")));
             }
             if let Some(data) = v.as_compound().and_then(|c| c.get("block_entity_data")).and_then(Tag::as_compound) {
                 block_entities.push(BlockEntity { pos: pos_of(i, plane, sz as usize), data: data.clone() });
@@ -153,7 +153,7 @@ pub(crate) fn parse(bytes: &[u8], limits: &Limits) -> Result<Structure, Error> {
     Ok(Structure { edition: Edition::Bedrock, format: Format::McStructure, format_version, size, origin, palette, blocks, block_entities, entities })
 }
 
-/// 线性下标 → 坐标（z 最快、然后 y、然后 x）。
+/// Linear index → position (z varies fastest, then y, then x).
 fn pos_of(i: usize, plane: usize, sz: usize) -> [u32; 3] {
     let x = i / plane;
     let y = (i % plane) / sz;
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn linear_index_order_is_z_fastest() {
-        // 4×17×14：167 → (0, 11, 13)
+        // 4×17×14: 167 → (0, 11, 13)
         assert_eq!(pos_of(167, 17 * 14, 14), [0, 11, 13]);
         assert_eq!(pos_of(0, 17 * 14, 14), [0, 0, 0]);
         assert_eq!(pos_of(17 * 14, 17 * 14, 14), [1, 0, 0]);
