@@ -275,10 +275,12 @@ def region(position, size, palette, cells, tiles=(), ents=()):
     })
 
 
-def litematic(version, regions, data_version=3953, lies=False):
+def litematic(version, regions, data_version=3953, lies=False, truth=None):
     meta = {"Name": tstr("fixture"), "Author": tstr("rsw"), "Description": tstr(""), "RegionCount": ti(len(regions)),
             "TotalBlocks": ti(1 if lies else 0), "TotalVolume": ti(1 if lies else 0), "EnclosingSize": xyz(1, 1, 1) if lies else xyz(0, 0, 0),
             "TimeCreated": tl(0), "TimeModified": tl(0)}  # lies: deliberately wrong metadata that the parser must ignore
+    if truth:  # (total blocks, total volume, (x, y, z)): metadata as Litematica itself writes it
+        meta["TotalBlocks"], meta["TotalVolume"], meta["EnclosingSize"] = ti(truth[0]), ti(truth[1]), xyz(*truth[2])
     root = {"MinecraftDataVersion": ti(data_version), "Version": ti(version)}
     if version >= 7:
         root["SubVersion"] = ti(1)
@@ -422,6 +424,50 @@ def many(palette_size, size, step, add):
     return litematic(6, [("many", region((0, 0, 0), size, palette, cells))])
 
 
+def large_region():
+    """One region the size of a small build: 40×20×36 cells, a palette of 700 entries (10 bits per index, so indices span long
+    boundaries) and a few hundred block entities on chests, barrels and signs, with truthful metadata. The test checks the
+    decoded block count against TotalBlocks and the cell order against the block entity positions, which are recorded
+    separately: with a wrong cell order most block entities would land on air or on blocks without a block entity."""
+    size = (40, 20, 36)
+    with_entity = []
+    for facing in ("north", "south", "east", "west"):
+        with_entity.append(("minecraft:chest", {"facing": facing, "type": "single", "waterlogged": "false"}))
+    for facing in ("north", "south", "east", "west", "up", "down"):
+        for opened in ("false", "true"):
+            with_entity.append(("minecraft:barrel", {"facing": facing, "open": opened}))
+    for rotation in range(16):
+        with_entity.append(("minecraft:oak_sign", {"rotation": str(rotation), "waterlogged": "false"}))
+    plain = []
+    for instrument in ("harp", "basedrum", "snare", "hat", "bass", "flute", "bell", "guitar", "chime", "xylophone",
+                       "iron_xylophone", "cow_bell", "didgeridoo", "bit", "banjo", "pling"):
+        for note in range(25):
+            for powered in ("false", "true"):
+                plain.append(("minecraft:note_block", {"instrument": instrument, "note": str(note), "powered": powered}))
+    palette = [AIR] + with_entity + plain
+    palette = palette[:700]
+    first_plain = 1 + len(with_entity)
+    entity_ids = {"minecraft:chest": "minecraft:chest", "minecraft:barrel": "minecraft:barrel", "minecraft:oak_sign": "minecraft:sign"}
+    seed = 20261119
+    cells, tiles = {}, []
+    n = size[0] * size[1] * size[2]
+    for i in range(n):
+        seed = (seed * 6364136223846793005 + 1442695040888963407) % (1 << 64)
+        r = seed >> 33
+        x, z, y = i % size[0], (i // size[0]) % size[2], i // (size[0] * size[2])
+        if r % 100 < 45:
+            continue  # air
+        if r % 41 == 0:
+            v = 1 + (r // 41) % len(with_entity)
+            name = palette[v][0]
+            tiles.append((x, y, z, {"id": tstr(entity_ids[name])}))
+        else:
+            v = first_plain + (r // 7) % (len(palette) - first_plain)
+        cells[(x, y, z)] = v
+    reg = region((-7, 64, 12), size, palette, cells, tiles)
+    return litematic(6, [("build", reg)], truth=(len(cells), n, size))
+
+
 def gen(out):
     os.makedirs(out, exist_ok=True)
     files = {}
@@ -432,6 +478,7 @@ def gen(out):
     files["multi_region.litematic"], files["multi_region_flat.nbt"] = lit, flat
     files["palette17.litematic"] = many(17, (7, 5, 3), 7, 3)    # 5 bits: 105 indices = 525 bits, crossing long boundaries many times
     files["palette64.litematic"] = many(64, (5, 4, 4), 5, 1)    # exactly 2^6: 6 bits; 64 is not a multiple of 6, so indices cross boundaries too
+    files["large_region.litematic"] = large_region()            # 700 entries: 10 bits, plus block entities and truthful metadata
     for name, data in files.items():
         with open(os.path.join(out, name), "wb") as f:
             f.write(data)
